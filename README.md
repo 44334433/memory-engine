@@ -52,6 +52,21 @@ We ran a framework in production and hit exactly that wall: compressed context d
 
 Single binary process, single database, no external services. The embedder is warm-resident; cold-start warmup is part of the health check (`/v1/health` asserts db + model + warm + ready, all four).
 
+## Self-evolution
+
+The engine tunes itself from its own traffic — four loops, all running today:
+
+- **Parameter self-tuning** (`scripts/param_autotune.py` + weekly systemd timer): mutates retrieval weights (RRF k / route weights), replays the eval question set per-question, and commits a new parameter snapshot only after two consecutive rounds beat the frozen baseline by ≥5%. Otherwise it rolls back and logs why. First scheduled run: dry-run.
+- **Use-it-or-lose-it** (lifecycle): the `access_events` table feeds the TTL state machine — memories that get recalled and *adopted* by the host get their lifespan extended; 90 days of zero access demotes them toward decay. Memory that is never used stops costing retrieval quality.
+- **Failure backflow** (`src/memory_engine/hard_queries.py`): every recall that returns nothing (or a below-threshold top score) lands in a hard-query pool. Periodic analysis turns the pool into concrete tuning proposals instead of letting failures evaporate.
+- **Consolidation** (`scripts/consolidate_synthesize.py`): clusters of same-domain active memories synthesize into observation drafts via the batch LLM channel — drafts only, a human reviews before anything enters the store. No silent rewrites of your memory.
+
+Two honesty notes: the self-tuning gate uses paired per-question testing (not aggregate averages, which hide regressions), and none of these loops can delete or rewrite memories — consolidation stops at draft, deletion stays manual.
+
+## Knowledge graph
+
+Beyond vectors and full-text, the schema carries an entity-relation layer (`entities` / `edges`, lightweight, no separate graph DB): memories are linked by extracted entities, and recall runs a fourth route over the graph — a one-hop pull-back catches the related memory that vector similarity missed. Current state is deliberately minimal: 3.4k edges on the production corpus, extraction running as a pilot, no visualization UI. If you want a full property graph with a browser, this is not that tool (yet).
+
 ## Quick Start
 
 ```bash
