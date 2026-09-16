@@ -1,13 +1,35 @@
+# CI: pytest (full suite, real engine + real PG) + flake8.
+#
+# Database: PostgreSQL 18 + pgvector + PGroonga in one service container
+# (built from deploy/ci/Dockerfile — see that file for why a stock
+# `pgvector/pgvector:pg18` image is not sufficient: PGroonga has no Debian
+# build for PG18, only the groonga Ubuntu PPA ships postgresql-18-pgdg-pgroonga).
+# The container is started in a step (not the `services:` block) because the
+# image must be built from the repo first; GitHub Actions services cannot
+# reference a locally built image.
+#
+# Flow: build PG image → start → schema.sql + scripts/migrate.py --apply →
+# install deps → start engine daemon (CPU embedder) → flake8 → pytest tests/ sdk/python/tests.
+
 name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      MEMORY_ENGINE_PORT: "8766"
+      MEMORY_ENGINE_PG_DSN: postgresql://postgres@127.0.0.1:5433/memengine?sslmode=disable
+      MEMORY_ENGINE_EMBED_DEVICE: cpu
+      MEMORY_ENGINE_WARMUP_BUDGET_MS: "10000"
+      MEMORY_ENGINE_INJECTION_SCAN: external_only
+      HF_HUB_DISABLE_XET: "1"
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -15,11 +37,63 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install test deps
-        run: python -m pip install --upgrade pip && pip install pytest
+      - name: Build PG18 + pgvector + pgroonga image
+        run: docker build -t pg18-mem-ci -f deploy/ci/Dockerfile deploy/ci
 
-      - name: Syntax check (py_compile 全量 src/eval/tests/deploy)
-        run: python -m compileall -q src eval tests deploy
+      - name: Start PG service container
+        run: |
+          docker run -d --name pg-ci -p 5433:5432 pg18-mem-ci
+          for i in $(seq 1 30); do
+            if pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; then
+              echo "pg ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "pg failed to become ready"; docker logs pg-ci; exit 1
 
-      - name: Unit tests（集成套件在无 daemon 时自动 skip）
-        run: pytest tests/ -v
+      - name: Install engine + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn "psycopg[binary]" pydantic httpx
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers pytest flake8
+          pip install -e sdk/python
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-qwen3-embedding-0.6b
+
+      - name: Apply schema + migrations (auto-run)
+        run: |
+          PGHOST=127.0.0.1 PGPORT=5433 PGUSER=postgres PGDATABASE=memengine \
+            psql -v ON_ERROR_STOP=1 -f schema.sql
+          python3 scripts/migrate.py --apply
+
+      - name: Start engine daemon
+        run: |
+          PYTHONPATH=src python3 -m memory_engine.cli serve &
+          python3 - <<'PY'
+          import json, sys, time, urllib.request
+          for i in range(120):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:8766/v1/health", timeout=5) as r:
+                      h = json.loads(r.read())
+                  if h.get("ready"):
+                      print("engine ready:", h); sys.exit(0)
+              except Exception:
+                  pass
+              time.sleep(2)
+          print("engine not ready in time"); sys.exit(1)
+          PY
+
+      - name: Lint (flake8)
+        run: flake8 src tests sdk/python --max-line-length=120 --extend-ignore=E203
+
+      - name: Test (pytest, full suite)
+        run: pytest tests/ sdk/python/tests -v --tb=short
+
+      - name: Dump engine log on failure
+        if: failure()
+        run: docker logs pg-ci || true
