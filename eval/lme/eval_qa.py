@@ -8,6 +8,9 @@
 - 模型：本地 llama-server（生成=判定同模型）→ 数字仅同模型内部自比（RAG vs no-retrieval Δ），
   严禁与官方 GPT-4o-judged 榜单数字直接对比。
 - 子样本：非弃答题中固定种子抽样（seed=42, N=100），清单落盘可复现。
+- 全量口径（2026-09-17）：LME_QA_N=470 = 全部 470 条非弃答题（500 题中 30 条 _abs 弃答题
+  无 QA 可评）；同 seed 下前 100 条与 n=100 子样本完全重合（超集，可对照）。
+- 断点续跑：LME_QA_RESUME=1 时从 qa_log.jsonl 已完成 qid 继续（470 题约 3-4h，防中断重跑）。
 """
 import json
 import os
@@ -19,9 +22,10 @@ import urllib.request
 from datetime import datetime, timezone
 
 LME_DIR = os.path.expanduser("~/.hermes/memory-engine/eval/lme")
-ENGINE = "http://127.0.0.1:8767"
-LLM = "http://127.0.0.1:8769/v1/chat/completions"
-N_SAMPLE = 100
+ENGINE = os.environ.get("ENGINE", "http://127.0.0.1:8767")
+LLM = os.environ.get("LLM", "http://127.0.0.1:8769/v1/chat/completions")
+N_SAMPLE = int(os.environ.get("LME_QA_N", "100"))
+RESUME = os.environ.get("LME_QA_RESUME", "") == "1"
 SEED = 42
 TOPK = 5
 DATE_RE = re.compile(r"(\d{4})/(\d{2})/(\d{2}).*?(\d{2}):(\d{2})")
@@ -96,15 +100,32 @@ def main() -> int:
     print(f"sample={len(sample)} (seed={SEED})", flush=True)
 
     # 原始数据（重建 round：需要 assistant 回复）
-    for f in (f"{LME_DIR}/qa_log.jsonl",):
-        if os.path.exists(f):
-            os.remove(f)
+    done: dict[str, dict] = {}
+    if RESUME and os.path.exists(f"{LME_DIR}/qa_log.jsonl"):
+        for l in open(f"{LME_DIR}/qa_log.jsonl", encoding="utf-8"):
+            try:
+                r = json.loads(l)
+                done[r["question_id"]] = r
+            except Exception:
+                pass
+        print(f"resume: {len(done)} already done", flush=True)
+    else:
+        for f in (f"{LME_DIR}/qa_log.jsonl",):
+            if os.path.exists(f):
+                os.remove(f)
     data = json.load(open("/media/qq/Linux/HermesArchive/longmemeval/hf-cleaned/longmemeval_s_cleaned.json"))
     by_qid = {e["question_id"]: e for e in data}
 
     results = {"rag": [], "norag": []}
     t0 = time.time()
+    n_new = 0
     for i, q in enumerate(sample):
+        if q["question_id"] in done:
+            r = done[q["question_id"]]
+            results["rag"].append({"qid": q["question_id"], "label": r["rag_label"]})
+            results["norag"].append({"qid": q["question_id"], "label": r["norag_label"]})
+            continue
+        n_new += 1
         entry = by_qid[q["question_id"]]
         sess_map = {sid: s for sid, s in zip(entry["haystack_session_ids"], entry["haystack_sessions"])}
         date_map = {sid: d for sid, d in zip(entry["haystack_session_ids"], entry["haystack_dates"])}
@@ -162,7 +183,8 @@ def main() -> int:
                 "accuracy": round(sum(x["label"] for x in labels) / len(labels), 4),
                 "by_type": {k: round(sum(v) / len(v), 4) for k, v in by_type.items()}}
 
-    out = {"config": {"n": len(sample), "seed": SEED, "topk": TOPK,
+    out = {"config": {"n": len(sample), "requested": N_SAMPLE, "new_this_run": n_new,
+                      "seed": SEED, "topk": TOPK,
                       "gen_model": "local llama-server (see report)",
                       "judge": "official get_anscheck_prompt, same local model",
                       "note": "同模型自比口径；禁止与官方 GPT-4o-judged 数字直接对比"},
