@@ -11,7 +11,7 @@
 | 指标 | 数值 | 测量口径 |
 |---|---|---|
 | 召回 P@5 | **0.583** vs 0.194 基线（会话级 FTS 检索） | 内部评测集，36 条生产查询，三路混合召回 |
-| 召回延迟 | **P95 = 21.7 ms**（嵌入+SQL+融合端到端） | 生产 daemon，约 2.3k 条活跃记忆 |
+| 召回延迟 | **P95 = 15.8 ms**（嵌入+SQL+融合端到端） | 生产 daemon，约 2.3k 条活跃记忆；全量回归 28/28 含评测语料负载 |
 | 迁移 | 2,303 条记忆迁移，3,681 条会话流条目退役 | 一次性迁移+新鲜度审计 |
 
 *基线为同一语料上的生产 FTS 检索；评测集为私有（含真实生产内容）——[`eval/`](eval/) 公开评测方法与脚本，数据集不公开。*
@@ -111,6 +111,11 @@ pytest tests/ -v
 | 运维重量 | daemon+1 数据库 | 服务 | 通常较轻 |
 
 诞生于自建 Agent 平台（[Hermes Agent](https://hermes-agent.nousresearch.com/docs) 生态）的记忆层；超大工具输出的「引用化+回查」思路参考 [NeverFull 压缩代理](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy)（设计研究——尚未接线）。
+
+## 运维工具
+
+- [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL 物理清理，fail-closed 三重前置闸（当日备份在位、批次导出异盘、引擎健康四真）。默认 dry-run；删除只走 HTTP API，禁直改数据库。
+- `tests/last_smoke.json` / `tests/last_stage2.json` — 最新全量回归证据（28/28 通过，评测语料负载下 P95 = 15.8 ms）。
 
 ## 许可证
 

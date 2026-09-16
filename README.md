@@ -11,7 +11,7 @@ Production-proven in a single-host deployment serving a multi-agent system aroun
 | Metric | Value | How measured |
 |---|---|---|
 | Recall P@5 | **0.583** vs 0.194 baseline (session-scoped FTS) | Internal eval, 36 production queries, three-way hybrid retrieval |
-| Recall latency | **P95 = 21.7 ms** end-to-end (embedding + SQL + rerank) | Production daemon, ~2.3k live memories |
+| Recall latency | **P95 = 15.8 ms** end-to-end (embedding + SQL + rerank) | Production daemon, ~2.3k live memories; full regression 28/28 incl. eval-corpus load |
 | Migration | 2,303 memories migrated, 3,681 session-stream entries retired | One-shot migration with freshness audit |
 
 *The baseline is a production FTS retrieval of the same corpus; the eval set is private (contains real production content) — the harness in [`eval/`](eval/) is published, the dataset is not.*
@@ -111,6 +111,11 @@ Writes are deduplicated (cosine ≥ 0.97 against the last 30 days, context requi
 | Ops weight | daemon + 1 DB | service | usually light |
 
 Born as the memory layer of a self-built agent platform ([Hermes Agent](https://hermes-agent.nousresearch.com/docs) ecosystem); the reference-and-callback idea for oversized tool outputs takes after [NeverFull compression proxy](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy) (design study — not yet wired in).
+
+## Maintenance tooling
+
+- [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL purge with fail-closed triple gates (same-day backup exists, batch exported to external disk, engine health four-true). Dry-run by default; deletion goes through the HTTP API only, never direct SQL.
+- `tests/last_smoke.json` / `tests/last_stage2.json` — latest full-regression evidence (28/28 checks, P95 = 15.8 ms under eval-corpus load).
 
 ## License
 
