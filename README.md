@@ -115,7 +115,7 @@ Born as the memory layer of a self-built agent platform ([Hermes Agent](https://
 ## Maintenance tooling
 
 - [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL purge with fail-closed triple gates (same-day backup exists, batch exported to external disk, engine health four-true). Dry-run by default; deletion goes through the HTTP API only, never direct SQL.
-- `tests/last_smoke.json` / `tests/last_stage2.json` — latest full-regression evidence (28/28 checks, P95 = 15.8 ms under eval-corpus load).
+- Regression evidence files (`tests/last_smoke.json`, `tests/last_stage2.json`) are generated per run and kept out of version control; last full run: 28/28 checks, P95 = 15.8 ms under eval-corpus load.
 
 ## License
 

@@ -115,7 +115,7 @@ pytest tests/ -v
 ## 运维工具
 
 - [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL 物理清理，fail-closed 三重前置闸（当日备份在位、批次导出异盘、引擎健康四真）。默认 dry-run；删除只走 HTTP API，禁直改数据库。
-- `tests/last_smoke.json` / `tests/last_stage2.json` — 最新全量回归证据（28/28 通过，评测语料负载下 P95 = 15.8 ms）。
+- 回归证据文件（`tests/last_smoke.json`、`tests/last_stage2.json`）按次生成不入库；最近一次全量回归：28/28 通过，评测语料负载下 P95 = 15.8 ms。
 
 ## 许可证
 
