@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from . import config, db, poison_gate, recall as recall_mod
+from . import hard_queries
 from .util import content_hash, dedup_hash, derive_title, staleness_of, uuid7, vec_to_pg
 
 log = logging.getLogger("memory-engine.api")
@@ -184,7 +185,20 @@ def recall(req: RecallRequest, request: Request, bg: BackgroundTasks):
     if res["results"]:
         hit_ids = [r["id"] for r in res["results"]]
         bg.add_task(_record_hits, eng, hit_ids, req.caller, req.query)
+    # —— L3 失败回流（P1 第三批）：零命中/低分 query 落困难样本池（后台任务，不入关键路径）——
+    top1 = res["results"][0]["score"] if res["results"] else None
+    if top1 is None or top1 < config.HARD_QUERY_SCORE:
+        reason = "zero_hit" if top1 is None else "low_score"
+        bg.add_task(_record_hard_query, req.query, req.caller, req.bank, top1, reason)
     return res
+
+
+def _record_hard_query(query: str, caller: str, bank: str | None,
+                       top1_score: float | None, reason: str) -> None:
+    try:
+        hard_queries.record_hard_query(query, caller, top1_score, bank, reason)
+    except Exception as e:
+        log.warning("hard_query record failed: %s", e)
 
 
 def _record_hits(eng, hit_ids: list, caller: str, query: str) -> None:

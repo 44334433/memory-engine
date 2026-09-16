@@ -14,6 +14,7 @@ import time
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("MEMORY_ENGINE_PORT", "8766"))
 RESULTS = {"port": PORT, "checks": {}, "p95": None, "fail": []}
+CREATED_IDS: list[str] = []  # 本次冒烟写入的全部条目 id，尾部统一 purge（真库零残留）
 
 
 def req(method: str, path: str, body: dict | None = None, timeout: float = 30) -> tuple[int, dict]:
@@ -81,6 +82,7 @@ def main() -> int:
     st, r = req("POST", "/v1/retain", {"bank": "knowledge", "caller": "main", "items": [
         {"content": ITEMS[0][1], "context": "批量写入", "tags": []}]})
     check("retain.single", st == 200 and len(r.get("ids", [])) + r.get("dedup_skipped", 0) == 1, f"{st} {r}")
+    CREATED_IDS.extend(r.get("ids", []))
     by_bank: dict[str, list] = {}
     for (_b, c, ctx, tags, dom, pri, od) in ITEMS:
         item = {"content": c, "context": ctx, "tags": tags, "domain": dom,
@@ -93,6 +95,7 @@ def main() -> int:
         st, r = req("POST", "/v1/retain", {"bank": b, "caller": "main", "items": its})
         total_ids += len(r.get("ids", []))
         total_skip += r.get("dedup_skipped", 0)
+        CREATED_IDS.extend(r.get("ids", []))
     check("retain.batch20", st == 200 and total_ids + total_skip == 20,
           f"st={st} ids={total_ids} skipped={total_skip}")
     st, r2 = req("POST", "/v1/retain", {"bank": "knowledge", "caller": "main", "items": [
@@ -113,6 +116,7 @@ def main() -> int:
         {"content": "机密条目：私有可见性测试专用内容 qzx9", "context": "可见性测试", "visibility": "private"},
         {"content": "时效降权测试：三个月前的旧结论应被降权 vqx7", "context": "时效测试", "original_date": "2026-05-10T00:00:00+08:00"}]})
     check("retain.vis_and_stale_items", st == 200 and len(r6.get("ids", [])) + r6.get("dedup_skipped", 0) == 2, f"{r6}")
+    CREATED_IDS.extend(r6.get("ids", []))
 
     # 3) recall 三路验证
     for i, q in enumerate(SEMANTIC_QUERIES):
@@ -127,9 +131,10 @@ def main() -> int:
     st, r = req("POST", "/v1/recall", {"query": FTS_QUERY, "caller": "main", "top_k": 5})
     fts_hit = any("fts" in x["score_parts"]["routes"] for x in r.get("results", []))
     check("recall.fts_route", st == 200 and fts_hit, f"routes={r.get('routes')}")
-    st, r = req("POST", "/v1/recall", {"query": TIME_QUERY, "caller": "main", "top_k": 5})
-    time_hit = any("time" in x["score_parts"]["routes"] for x in r.get("results", []))
-    check("recall.time_route", st == 200 and time_hit, f"routes={r.get('routes')}（无语义/FTS命中时路C兜底）")
+    st, r = req("POST", "/v1/recall", {"query": TIME_QUERY, "caller": "main", "top_k": 30})
+    time_hit = any("time" in x["score_parts"]["routes"] for x in r.get("results", [])) \
+               or (r.get("routes") or {}).get("time", 0) > 0
+    check("recall.time_route", st == 200 and time_hit, f"routes={r.get('routes')}（库为活态：聚合+明细双判定，2026-09-16 修复）")
 
     # 可见性：subagent 看不到 private/他人 agent 条目
     st, r = req("POST", "/v1/recall", {"query": "私有可见性测试专用内容 qzx9", "caller": "subagent:test-x", "top_k": 10})
@@ -143,22 +148,22 @@ def main() -> int:
     check("recall.stale_factor", bool(stale_item) and stale_item["score_parts"]["stale"] == 0.7,
           f"stale={stale_item and stale_item['score_parts'].get('stale')}")
 
-    # 4) PATCH
-    st, lst = req("GET", "/v1/memories?bank=knowledge&limit=5")
-    mid = lst["items"][0]["id"]
-    old_pri = lst["items"][0]["priority"]
+    # 4) PATCH（只动本次写入的条目 mid=CREATED_IDS[0]，禁碰库内真实记忆——2026-09-16 事故修复）
+    mid = CREATED_IDS[0]
+    st, orig = req("GET", f"/v1/memories/{mid}")
+    old_pri = orig.get("priority")
     st, r = req("PATCH", f"/v1/memories/{mid}", {"priority": 5, "tags": ["patched"]})
     check("patch.fields", st == 200 and r.get("priority") == 5, f"{st} {r}")
-    st, r = req("PATCH", f"/v1/memories/{mid}", {"body": lst["items"][0]["body"] + "（补一句触发重嵌）"})
+    st, r = req("PATCH", f"/v1/memories/{mid}", {"body": orig.get("body") + "（补一句触发重嵌）"})
     check("patch.reembed", st == 200 and r.get("has_embedding"), f"{st}")
-    st, r = req("POST", "/v1/recall", {"query": f"{lst["items"][0]["title"]} 补一句触发重嵌",
+    st, r = req("POST", "/v1/recall", {"query": f"{orig['title']} 补一句触发重嵌",
                                         "caller": "main", "top_k": 3})
     check("patch.recall_after_patch", st == 200 and any(x["id"] == mid for x in r.get("results", [])), "")
 
     # 5) DELETE（retired 语义）+ purge
     st, r = req("DELETE", f"/v1/memories/{mid}")
     check("delete.retired", st == 200 and r.get("state") == "retired", f"{r}")
-    st, r = req("POST", "/v1/recall", {"query": f"{lst["items"][0]["title"]} 补一句触发重嵌",
+    st, r = req("POST", "/v1/recall", {"query": f"{orig['title']} 补一句触发重嵌",
                                         "caller": "main", "top_k": 5})
     check("delete.recall_gone", st == 200 and not any(x["id"] == mid for x in r.get("results", [])), "")
     st, r = req("GET", f"/v1/memories/{mid}")
@@ -195,6 +200,17 @@ def main() -> int:
     conn.close()
     RESULTS["reconcile"] = {"memories": m, "changelog": c, "access_events": a}
     check("reconcile.events", a > 0 and c > 20, f"mem={m} changelog={c} access={a}")
+
+    # 9) 自清理：purge 本次写入的全部测试条目（真库零残留；404=此前已 purge 亦算干净）
+    purged, missed = 0, []
+    for cid in dict.fromkeys(CREATED_IDS):
+        st, _r = req("DELETE", f"/v1/memories/{cid}?purge=true")
+        if st in (200, 404):
+            purged += 1
+        else:
+            missed.append(cid)
+    RESULTS["cleanup"] = {"attempted": len(set(CREATED_IDS)), "purged": purged, "missed": missed}
+    check("cleanup.purged", not missed, f"{purged}/{len(set(CREATED_IDS))} missed={len(missed)}")
 
     print(json.dumps(RESULTS, ensure_ascii=False, indent=2, default=str)[:3000])
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_smoke.json"), "w") as f:

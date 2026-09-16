@@ -132,4 +132,29 @@ WEAK_GRAPH_GROUP_CAP = int(os.environ.get("MEMORY_ENGINE_WEAK_GRAPH_GROUP_CAP", 
 LLM_EXTRACT_MODEL = os.environ.get("MEMORY_ENGINE_LLM_MODEL", "deepseek-v4-flash")
 LLM_EXTRACT_TIMEOUT = float(os.environ.get("MEMORY_ENGINE_LLM_TIMEOUT", "120"))
 
-VERSION = "0.3.0-p1b"
+# —— P1 第三批（2026-09-16）：自进化闭环 L1-L4 接线 ——
+# L2 用进废退（路线图 §自进化）：adopted=宿主引用上报（强信号）→ decaying 升级窗 30d
+# （recall_hit 复活窗维持拍板 REVIVE_WINDOW_DAYS=3 不动）；零访问=access_events 任意 kind
+# 连续 N 天无记录 → trial/active 提前 decaying（锚=GREATEST(最近任意访问, created_at)）。
+# 既有拍板参数（TRIAL_DECAY_DAYS/ACTIVE_DECAY_DAYS/REVIVE_WINDOW_DAYS/DECAY_ARCHIVE_DAYS）全部不动。
+L2_ADOPT_WINDOW_DAYS = int(os.environ.get("MEMORY_ENGINE_L2_ADOPT_WINDOW_DAYS", "30"))
+L2_ZERO_ACCESS_DAYS = int(os.environ.get("MEMORY_ENGINE_L2_ZERO_ACCESS_DAYS", "90"))
+# L3 失败回流：recall 零命中/top1 低分 query → STATE_DIR/hard_queries.jsonl
+# （去重=TTL 窗口内同 query 跳重；上限 CAP 防膨胀；校准实证：vector 路恒有候选 → 零命中罕见，
+#   阈值默认捕捉融合尾部/图-only 领跑，调高即更严）
+STATE_DIR = Path(os.environ.get("MEMORY_ENGINE_STATE_DIR", str(BASE_DIR / "state")))
+HARD_QUERY_SCORE = float(os.environ.get("MEMORY_ENGINE_HARD_QUERY_SCORE", "0.005"))
+HARD_QUERY_CAP = int(os.environ.get("MEMORY_ENGINE_HARD_QUERY_CAP", "500"))
+HARD_QUERY_TTL_DAYS = int(os.environ.get("MEMORY_ENGINE_HARD_QUERY_TTL_DAYS", "7"))
+HARD_QUERY_MIN_LEN = int(os.environ.get("MEMORY_ENGINE_HARD_QUERY_MIN_LEN", "4"))
+HARD_QUERY_PROPOSAL_MIN_HITS = int(os.environ.get("MEMORY_ENGINE_HARD_QUERY_PROPOSAL_MIN", "3"))
+HARD_QUERY_ANALYSIS_MIN_S = int(os.environ.get("MEMORY_ENGINE_HARD_QUERY_ANALYSIS_MIN_S", "3600"))
+# L1 参数自调（G07 S1 级盲审硬约束：36 题 P@5 二元指标 SE≈7.6pp → 自调固化闸必须
+# 配对逐题检验（McNemar 式）+ 连续两轮通过 + 参数快照版本化；时序类参数（衰减天数/状态系数）
+# 移出即时闸另立月度人工评审——本框架变异仅限非时序标量 RRF_K/TIER_WEIGHTS）。
+AUTOTUNE_DIR = Path(os.environ.get("MEMORY_ENGINE_AUTOTUNE_DIR", str(STATE_DIR / "param_autotune")))
+AUTOTUNE_MIN_DELTA = float(os.environ.get("MEMORY_ENGINE_AUTOTUNE_MIN_DELTA", "0.05"))  # ≥基线+5pp
+AUTOTUNE_ALPHA = float(os.environ.get("MEMORY_ENGINE_AUTOTUNE_ALPHA", "0.05"))          # McNemar 显著性
+AUTOTUNE_ROUNDS = int(os.environ.get("MEMORY_ENGINE_AUTOTUNE_ROUNDS", "2"))             # 连续两轮
+
+VERSION = "0.4.0-p1c"

@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from . import config, db, lifecycle as lc, consolidate as consol
+from . import hard_queries
 
 log = logging.getLogger("memory-engine.api")
 router = APIRouter(prefix="/v1")
@@ -88,6 +89,11 @@ def lifecycle_run(request: Request, body: RunRequest | None = None):
                    "INSERT INTO engine_meta(key,value) VALUES ('lifecycle_last_scan',%s::jsonb) "
                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
                    (json.dumps(result, ensure_ascii=False),))
+    # L3 失败回流（P1 第三批）：同步触发周期分析（内部节流；dry_run 保持只读不触发）
+    try:
+        result["hard_query_analysis"] = hard_queries.analyze_hard_queries()
+    except Exception as e:                          # 分析失败不拖垮巡扫响应
+        result["hard_query_analysis"] = {"error": str(e)[:200]}
     return result
 
 

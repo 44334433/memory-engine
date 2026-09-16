@@ -99,6 +99,8 @@ async def lifespan(app: FastAPI):
             eng.embedder.warmup()                    # dummy ×2 消 kernel 编译
         except Exception as e:  # noqa: BLE001 —— 预热失败不炸启动，调用期按路降级
             log.warning("embedder warmup failed (per-call degrade): %s", e)
+    else:
+        _spawn_embedder_selfheal(eng)                # 保活：降级态周期重试拉回全功能（2026-09-16）
     _prewarm(eng.db)
     smoke = recall_mod.recall(eng.db, eng.embedder, "memory engine warmup 预热查询", None, "main", 3, {})
     if smoke["took_ms"] >= 200:
@@ -120,6 +122,27 @@ async def lifespan(app: FastAPI):
     if eng.db:
         eng.db.close()
     sd_notify("STOPPING=1")
+
+
+def _spawn_embedder_selfheal(eng) -> None:
+    """保活线程：降级态每 60s 重试 embedder.load()+warmup()，成功即拉回全功能并 log。
+    背景：P1 降级批「加载失败不炸启动」缺自愈——路径错/GPU 瞬时被占等可恢复故障会永远困在 fts-only（2026-09-16 事故）。"""
+    import threading
+
+    def _heal_loop() -> None:
+        attempt = 0
+        while eng.model_loaded is False:
+            attempt += 1
+            time.sleep(60)
+            try:
+                eng.embedder.load()
+                eng.embedder.warmup()
+                eng.model_loaded = True
+                log.warning("embedder self-heal OK after %d attempts → vector 路由恢复", attempt)
+            except Exception as e:  # noqa: BLE001 —— 继续重试，不退出
+                log.warning("embedder self-heal attempt %d failed: %s", attempt, str(e)[:200])
+
+    threading.Thread(target=_heal_loop, daemon=True, name="embedder-selfheal").start()
 
 
 def create_app() -> FastAPI:
