@@ -92,14 +92,20 @@ def cmd_backup(args) -> int:
 
 
 def cmd_wait_ready(args) -> int:
-    """ExecStartPost：轮询 /v1/health 至 db+model+warm 全真（蓝图 §8.2-5）。"""
+    """ExecStartPost：轮询 /v1/health 至 db+ready（daemon 已在服务即放行）。
+
+    P1 降级批（2026-09-16）：判定由 db+model+warm 全真放宽为 db+ready——嵌入 load 失败时
+    daemon 以 fts-only 降级态合法服务（health status=degraded + model_loaded=false 暴露）；
+    旧判定会把降级态误判为未就绪 → start-post 超时 → systemd 杀进程重启循环（演练实证）。
+    """
     url = f"http://{config.HOST}:{config.PORT}/v1/health"
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         try:
             d = json.loads(urllib.request.urlopen(url, timeout=3).read())
-            if d.get("db") and d.get("model_loaded") and d.get("warm"):
-                print("READY", json.dumps({"uptime_s": d.get("uptime_s"), "status": d.get("status")}))
+            if d.get("db") and d.get("ready"):
+                print("READY", json.dumps({"uptime_s": d.get("uptime_s"), "status": d.get("status"),
+                                           "model_loaded": d.get("model_loaded")}))
                 return 0
         except Exception:
             pass
