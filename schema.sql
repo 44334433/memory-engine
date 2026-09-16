@@ -1,7 +1,7 @@
--- memory-engine DDL v1（蓝图 §3.1 + 2026-09-16 先知拍板追加：original_date + staleness 时效字段）
+-- memory-engine DDL v2（蓝图 §3.1 + 2026-09-16 先知拍板追加：original_date + staleness 时效字段）
 -- 库：memengine @ 127.0.0.1:5433（专用实例 cluster=memengine）
 -- 扩展由 postgres superuser 预建：vector / pgroonga / pg_trgm / pg_prewarm
--- schema_ver = 1
+-- schema_ver = 2（v2 = P1 第二批：双时序 + 知识网络 entities/edges + 多宿主留位，见文件尾）
 
 CREATE TABLE IF NOT EXISTS memories (
   id            uuid PRIMARY KEY,                  -- UUIDv7（应用侧生成，时间有序）
@@ -43,7 +43,14 @@ CREATE TABLE IF NOT EXISTS memories (
   embed_ver     int  NOT NULL DEFAULT 1,           -- 重嵌批次版本（换模唯一豁免通道）
   content_hash  text NOT NULL,                     -- sha256(bank + body) 精确判重
   search_text   text GENERATED ALWAYS AS (title || ' ' || body) STORED,  -- FTS 索引列
-  embedding     vector(1024)                       -- pgvector 列
+  embedding     vector(1024),                      -- pgvector 列
+  -- —— 双时序（P1 第二批 2026-09-16；迁移 002 对存量库做同款 ALTER）——
+  valid_at      timestamptz NOT NULL DEFAULT now(),  -- 事件时间（默认=created_at 同瞬 now()）
+  invalid_at    timestamptz,                         -- 失效时刻（NULL=现行；矛盾更新=时间截断置位）
+  is_current    boolean GENERATED ALWAYS AS (invalid_at IS NULL) STORED,
+  -- —— 多宿主留位（P1 第二批：可空列，默认 NULL=单宿主不分区）——
+  tenant_id     text,
+  agent_id      text
 );
 
 CREATE INDEX IF NOT EXISTS idx_mem_bank_state ON memories (bank, ttl_state);
@@ -52,6 +59,11 @@ CREATE INDEX IF NOT EXISTS idx_mem_updated    ON memories (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_mem_hash       ON memories (content_hash);
 CREATE INDEX IF NOT EXISTS idx_mem_tags       ON memories USING gin (tags jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_mem_stale      ON memories (staleness);
+-- 双时序：现行版本部分索引（P1 第二批）
+CREATE INDEX IF NOT EXISTS idx_mem_current    ON memories (valid_at DESC) WHERE is_current;
+-- 多宿主留位：非空才入索引（单宿主全 NULL 不占空间）
+CREATE INDEX IF NOT EXISTS idx_mem_tenant     ON memories (tenant_id) WHERE tenant_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mem_agent      ON memories (agent_id)  WHERE agent_id IS NOT NULL;
 
 -- 向量路：HNSW 按 bank 部分索引（=sqlite-vec 分区语义的 PG 等价物）
 CREATE INDEX IF NOT EXISTS idx_vec_knowledge ON memories USING hnsw (embedding vector_cosine_ops)
@@ -85,7 +97,7 @@ CREATE TABLE IF NOT EXISTS engine_meta (key text PRIMARY KEY, value jsonb NOT NU
 
 -- engine_meta 种子（幂等）
 INSERT INTO engine_meta(key, value) VALUES
-  ('schema_ver', '1'::jsonb),
+  ('schema_ver', '2'::jsonb),
   ('embed_model', '"Qwen/Qwen3-Embedding-0.6B"'::jsonb),
   ('embed_dim', '1024'::jsonb),
   ('embed_ver', '1'::jsonb),
@@ -102,7 +114,39 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS contains_pii boolean;
 -- dedup_key = sha256(body + US(0x1f) + context)（应用层 util.dedup_hash 同构）；
 -- 存量回填=sha256(body + US)（context 未落库；新写入必带非空 context，永不与回填键冲突）；
 -- 部分唯一索引排除 retired（软删后允许同内容重建）；并发竞态撞索引→应用层返回既有条目。
+-- P1 第二批收紧：仅现行版本参与判重（AND is_current）——supersede 新旧版本共享 dedup_key。
 -- 存量迁移走 scripts/migrations/001_dedup_key_unique.sql（幂等，可重复执行）。
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS dedup_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_mem_dedup ON memories (bank, dedup_key)
-  WHERE dedup_key IS NOT NULL AND ttl_state <> 'retired';
+  WHERE dedup_key IS NOT NULL AND ttl_state <> 'retired' AND is_current;
+
+-- —— 双时序 + 知识网络 + 多宿主（2026-09-16 P1 第二批；存量库迁移走 scripts/migrations/002）——
+-- G15（S1 级盲审硬约束）：矛盾检测 observe-only——contradicts 边只记录，
+-- 绝不触发 memories.invalid_at 置位；升 enforce 前置=金标边集 precision>=0.7 且 30 天抽检通过。
+CREATE TABLE IF NOT EXISTS entities (
+  id         uuid PRIMARY KEY,
+  name       text NOT NULL,
+  etype      text NOT NULL CHECK (etype IN ('person','org','project','concept','tool','place','event','other')),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_entity_name ON entities (etype, lower(name));
+
+CREATE TABLE IF NOT EXISTS edges (
+  id         uuid PRIMARY KEY,
+  src_mid    uuid NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  dst_mid    uuid REFERENCES memories(id) ON DELETE CASCADE,           -- 记忆↔记忆边
+  entity_id  uuid REFERENCES entities(id) ON DELETE CASCADE,           -- 记忆↔实体边（与 dst_mid 二选一）
+  etype      text NOT NULL CHECK (etype IN ('related','causal','parent_child','contradicts')),
+  valid_at   timestamptz NOT NULL DEFAULT now(),
+  invalid_at timestamptz,                    -- NULL=现行边（双时序边）
+  source     text NOT NULL,                  -- weak_graph:<dim> | llm_extract | manual | supersede
+  CHECK (dst_mid IS NOT NULL OR entity_id IS NOT NULL),
+  CHECK (dst_mid IS NULL OR dst_mid <> src_mid)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_src    ON edges (src_mid)    WHERE invalid_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_dst    ON edges (dst_mid)    WHERE invalid_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edges_entity ON edges (entity_id)  WHERE invalid_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_edge_mem ON edges (src_mid, dst_mid, etype)
+  WHERE dst_mid IS NOT NULL AND invalid_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_edge_ent ON edges (src_mid, entity_id, etype)
+  WHERE entity_id IS NOT NULL AND invalid_at IS NULL;

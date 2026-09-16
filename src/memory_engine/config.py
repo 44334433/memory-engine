@@ -113,4 +113,23 @@ TIER_WEIGHTS = {
     "cron": float(os.environ.get("MEMORY_ENGINE_TIER_WEIGHT_CRON", "0.9")),
 }
 
-VERSION = "0.2.0-phase2"
+# —— P1 第二批（2026-09-16）：双时序 + 知识网络 + 多宿主留位 ——
+# 第四路图召回：从三路命中出发 1-2 跳邻拉（递归 CTE），RRF 融合加 graph 分量。
+# observe 期低调权重 0.5（可配 MEMORY_ENGINE_W_GRAPH）。
+W_GRAPH = float(os.environ.get("MEMORY_ENGINE_W_GRAPH", "0.5"))
+GRAPH_HOPS = int(os.environ.get("MEMORY_ENGINE_GRAPH_HOPS", "2"))            # 1-2 跳
+GRAPH_SEEDS_PER_ROUTE = int(os.environ.get("MEMORY_ENGINE_GRAPH_SEEDS_PER_ROUTE", "10"))
+GRAPH_SEEDS_MAX = int(os.environ.get("MEMORY_ENGINE_GRAPH_SEEDS_MAX", "24"))
+GRAPH_MAX_NEIGHBORS = int(os.environ.get("MEMORY_ENGINE_GRAPH_MAX_NEIGHBORS", "30"))
+# G15（S1 级盲审硬约束，写死）：矛盾检测 observe-only——contradicts 边只记录进 edges 表，
+# 绝不触发 memories.invalid_at 置位；升 enforce 前置条件 = 金标边集 precision>=0.7
+# 且 30 天抽检通过。该条件未达成前，任何代码路径不得由 contradicts 边改写 memories。
+CONTRADICTION_ENFORCE_PRECONDITION = "gold_edge_precision>=0.7 AND 30d_spotcheck_passed"
+# 弱图脚本（scripts/weak_graph_edges.py）：组内每记忆最多连 K 个近邻 peer / 每组最多参与成员数
+WEAK_GRAPH_K = int(os.environ.get("MEMORY_ENGINE_WEAK_GRAPH_K", "3"))
+WEAK_GRAPH_GROUP_CAP = int(os.environ.get("MEMORY_ENGINE_WEAK_GRAPH_GROUP_CAP", "100"))
+# LLM 实体抽取批量脚本（scripts/llm_entity_extract.py）：模型与请求参数（OpenAI 兼容网关）
+LLM_EXTRACT_MODEL = os.environ.get("MEMORY_ENGINE_LLM_MODEL", "deepseek-v4-flash")
+LLM_EXTRACT_TIMEOUT = float(os.environ.get("MEMORY_ENGINE_LLM_TIMEOUT", "120"))
+
+VERSION = "0.3.0-p1b"

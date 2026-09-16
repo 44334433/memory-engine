@@ -42,6 +42,8 @@ class RetainItem(BaseModel):
     original_date: Optional[str] = None
     source_tier: str = "agent"           # 投毒闸：四级来源，缺省=agent（不信任缺省）
     contains_pii: Optional[bool] = None  # 投毒闸预留：PII 判级待拍板，本批只入库
+    tenant_id: Optional[str] = None      # P1 二批：多宿主留位（缺省 None=单宿主不分区）
+    agent_id: Optional[str] = None
 
     @field_validator("source_tier")
     @classmethod
@@ -137,6 +139,7 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
                     content_hash=ch, embedding=vec_to_pg(vec), dedup_key=dk,
                     ttl_state=entry_state, ttl_expires_days=expires_days,
                     source_tier=it.source_tier, contains_pii=it.contains_pii,
+                    tenant_id=it.tenant_id, agent_id=it.agent_id,   # P1 二批：多宿主留位
                 )
             except psycopg.errors.UniqueViolation:
                 # P1 判重 UNIQUE 兜底：并发竞态撞 UNIQUE(bank, dedup_key) → 返回既有条目（非 500 不重试炸）；

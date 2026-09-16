@@ -7,6 +7,7 @@ P1 降级语义（2026-09-16 拍板）：嵌入路失败→降级纯 FTS+时序�
 """
 import logging
 import time
+import uuid
 from datetime import datetime
 
 from . import config, db
@@ -81,17 +82,25 @@ def _filters_sql(filters: dict | None) -> tuple[str, list]:
     if f.get("tags"):
         sql += " AND tags ?| %s::text[]"
         params.append([str(t) for t in f["tags"]])
+    if f.get("tenant_id"):
+        sql += " AND tenant_id = %s"      # P1 二批：多宿主过滤（不传=单宿主全量，NULL 行仅无过滤时可见）
+        params.append(str(f["tenant_id"]))
+    if f.get("agent_id"):
+        sql += " AND agent_id = %s"
+        params.append(str(f["agent_id"]))
     if f.get("staleness"):
         vals = f["staleness"] if isinstance(f["staleness"], (list, tuple)) else [f["staleness"]]
         sql += " AND staleness = ANY(%s::text[])"
         params.append([str(v) for v in vals])
-    dr = f.get("date_range") or {}
-    if dr.get("from"):
-        sql += " AND created_at >= %s"
-        params.append(dr["from"])
-    if dr.get("to"):
-        sql += " AND created_at <= %s"
-        params.append(dr["to"])
+    if f.get("date_range"):
+        dr = f["date_range"]
+        if dr.get("from"):
+            sql += " AND created_at >= %s"
+            params.append(dr["from"])
+        if dr.get("to"):
+            sql += " AND created_at <= %s"
+            params.append(dr["to"])
+    sql += " AND is_current"              # P1 二批：双时序——已失效历史版本不召回
     if f.get("include_archived"):
         sql += " AND ttl_state <> 'retired'"       # archived 可回捞；retired（用户删除）永不召回
     else:
@@ -104,6 +113,31 @@ def _life_factor(ttl_state: str, verify_status: str, include_archived: bool) -> 
     if ttl_state == "archived" and include_archived:
         base = config.LIFE_ARCHIVED_VISIBLE        # 归档显式可见=0.5
     return base * config.VERIFY_FACTOR.get(verify_status, 1.0)
+
+
+def _graph_seeds(*route_rows: list) -> list:
+    """图路种子 = 三路命中并集（每路取前 GRAPH_SEEDS_PER_ROUTE 条，总量截 GRAPH_SEEDS_MAX），保序去重。
+
+    非 UUID id（合成数据/异常调用方）直接跳过——生产路由行的 id 恒为 PG uuid 列，
+    此分支仅为兼容假 conn 测试与防御性容错，不产生降级信号。
+    """
+    per, cap = config.GRAPH_SEEDS_PER_ROUTE, config.GRAPH_SEEDS_MAX
+    out: list = []
+    seen: set = set()
+    for rows in route_rows:
+        for row in rows[:per]:
+            mid = row["id"]
+            try:
+                uuid.UUID(str(mid))
+            except (ValueError, AttributeError, TypeError):
+                log.debug("graph seed 非 UUID，跳过: %r", mid)
+                continue
+            if mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+                if len(out) >= cap:
+                    return out
+    return out
 
 
 def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | None, caller: str | None,
@@ -145,6 +179,20 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
         except Exception as e:
             log.warning("route C(time) failed: %s", e)
             failed_routes["time"] = str(e)[:300]
+        # —— P1 第二批：第四路图召回（从三路命中出发 1-2 跳邻拉；observe 期 W_GRAPH=0.5 低调可配）——
+        # 图路是增强不是主路：失败只登记 failed_routes.graph（降级显式），不参与「全路失败 503」判定。
+        rows_g: list = []
+        graph_attempted = False
+        if config.W_GRAPH > 0:
+            seeds = _graph_seeds(rows_a, rows_b, rows_c)
+            if seeds:
+                graph_attempted = True
+                try:
+                    rows_g = db.graph_expand(conn, seeds, config.GRAPH_HOPS,
+                                             vis_sql, vis_params, config.GRAPH_MAX_NEIGHBORS)
+                except Exception as e:  # noqa: BLE001 —— 图路失败显式登记（禁静默），不炸主召回
+                    log.warning("route D(graph) failed: %s", e)
+                    failed_routes["graph"] = str(e)[:300]
     if set(failed_routes) >= set(attempted):
         raise RecallRouteError(failed_routes)   # 全路失败→API 503+degraded+retryable（P1 唯一 503 入口）
     degraded = bool(failed_routes)              # 部分路失败=显式降级 200（degraded+failed_routes 透出）
@@ -157,11 +205,21 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             entry = fused.setdefault(row["id"], {"rrf": 0.0, "routes": {}})
             entry["rrf"] += weight / (config.RRF_K + rank)
             entry["routes"][name] = rank
+    # graph 分量：邻拉结果按 hop 升序做 RRF rank，加进 fused（新邻条目仅有 graph 分量）
+    graph_rrf: dict = {}
+    for rank, row in enumerate(rows_g, start=1):
+        g = config.W_GRAPH / (config.RRF_K + rank)
+        graph_rrf[row["id"]] = g
+        entry = fused.setdefault(row["id"], {"rrf": 0.0, "routes": {}})
+        entry["rrf"] += g
+        entry["routes"]["graph"] = rank
 
     if not fused:
+        routes = {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}
+        if graph_attempted:
+            routes["graph"] = len(rows_g)
         return {"results": [], "took_ms": round((time.perf_counter() - t0) * 1000, 1),
-                "degraded": degraded, "failed_routes": failed_routes,
-                "routes": {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}}
+                "degraded": degraded, "failed_routes": failed_routes, "routes": routes}
 
     with pool.connection() as conn:
         meta = db.hydrate(conn, list(fused.keys()))
@@ -182,6 +240,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
                 "rrf": round(entry["rrf"], 6), "pri": round(pri, 4),
                 "life": round(life, 4), "stale": stale,
                 "tier_weight": round(tier_w, 4),
+                "graph": round(graph_rrf.get(mid, 0.0), 6),   # P1 二批：graph 分量透出（observe 期 W_GRAPH=0.5）
                 "routes": entry["routes"],
             },
             "title": m["title"], "body": m["body"], "body_ptr": m["body_ptr"],
@@ -195,10 +254,13 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })
     scored.sort(key=lambda d: d["score"], reverse=True)
+    routes = {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}
+    if graph_attempted:
+        routes["graph"] = len(rows_g)
     return {
         "results": scored[:top_k],
         "took_ms": round((time.perf_counter() - t0) * 1000, 1),
         "degraded": degraded,
         "failed_routes": failed_routes,
-        "routes": {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)},
+        "routes": routes,
     }
