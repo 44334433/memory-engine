@@ -1,0 +1,10 @@
+[Unit]
+Description=memory-engine L1 param autotune (offline 36q paired eval, G07 two-round gate)
+After=memory-engine.service
+
+[Service]
+Type=oneshot
+# 正式轮：闸通过推进连续两轮计数；达标固化 config（引擎重启后生效）。
+# 首跑/演练用 --dry-run（出报告不固化）：/usr/bin/python3 /home/qq/.hermes/memory-engine/scripts/param_autotune.py --dry-run
+ExecStart=/usr/bin/python3 /home/qq/.hermes/memory-engine/scripts/param_autotune.py
+TimeoutStartSec=600

@@ -1,0 +1,9 @@
+[Unit]
+Description=memory-engine L1 param autotune weekly (Sun 04:20)
+
+[Timer]
+OnCalendar=Sun *-*-* 04:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
