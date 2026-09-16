@@ -91,6 +91,18 @@ pytest tests/ -v
 
 Writes are deduplicated (cosine ≥ 0.97 against the last 30 days, context required). Hosts keep a per-session read cursor; the next visit gets `POST /v1/freshness/digest` — bounded by budget, domain-scoped, same-key collapses to the net change. **No digest ≠ nothing happened; it means nothing you haven't already read.**
 
+## Benchmark
+
+Evaluated on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 500-question full set, official harness (2026-09-16):
+
+| Metric | memory-engine | Official BM25 baseline |
+|---|---|---|
+| Recall@5 | **0.652** | 0.528 |
+
+The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6B) + PostgreSQL full-text (PGroonga) + temporal routing, fused with weighted RRF. Reproduce with `eval/build_eval.py` + `eval/run_compare.py`.
+
+**Full-corpus honesty note**: when the haystack is expanded to the entire ~6k-entry production corpus (real heterogeneous memories instead of the benchmark's designed distractors — the hardest configuration), R@5 drops to 0.122. We report both numbers because benchmark-only scores overstate real-world recall; the production deployment mitigates this with time-windowed filtering and the freshness protocol.
+
 ## Honest limitations
 
 - **Single-host scale.** Designed for one agent system and one operator (tested to ~6k memories). No sharding story. If you need multi-tenant, this is the wrong tool *today*.
