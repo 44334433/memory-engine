@@ -144,7 +144,7 @@ Evaluated on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 500-qu
 |---|---|---|
 | Recall@5 | **0.652** | 0.528 |
 
-The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6B) + PostgreSQL full-text (PGroonga) + temporal routing, fused with weighted RRF. Reproduce with `eval/build_eval.py` + `eval/run_compare.py`.
+The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6B) + PostgreSQL full-text (PGroonga) + temporal routing, fused with weighted RRF. **Full data & reproduction pipeline: [`eval/lme/`](eval/lme/README.md)** — per-question results, corpus, and scripts are committed.
 
 **Full-corpus honesty note**: when the haystack is expanded to the entire ~6k-entry production corpus (real heterogeneous memories instead of the benchmark's designed distractors — the hardest configuration), R@5 drops to 0.122. We report both numbers because benchmark-only scores overstate real-world recall; the production deployment mitigates this with time-windowed filtering and the freshness protocol.
 

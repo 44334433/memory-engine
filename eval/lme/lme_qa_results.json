@@ -1,0 +1,35 @@
+{
+  "config": {
+    "n": 100,
+    "seed": 42,
+    "topk": 5,
+    "gen_model": "Qwen3-4B-Instruct-2507 Q4_K_M (llama-server, Vulkan, local)",
+    "judge": "official get_anscheck_prompt, same local model",
+    "note": "同模型自比口径；禁止与官方 GPT-4o-judged 数字直接对比"
+  },
+  "rag": {
+    "n": 100,
+    "accuracy": 0.41
+  },
+  "norag": {
+    "n": 100,
+    "accuracy": 0.08
+  },
+  "rag_by_type": {
+    "knowledge-update": 0.7,
+    "multi-session": 0.1765,
+    "single-session-assistant": 0.2857,
+    "single-session-preference": 0.8571,
+    "single-session-user": 0.6154,
+    "temporal-reasoning": 0.4138
+  },
+  "rag_by_type_n": {
+    "knowledge-update": 10,
+    "multi-session": 34,
+    "single-session-assistant": 7,
+    "single-session-preference": 7,
+    "single-session-user": 13,
+    "temporal-reasoning": 29
+  },
+  "delta_rag_minus_norag": 0.33
+}

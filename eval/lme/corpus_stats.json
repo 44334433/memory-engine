@@ -1,0 +1,21 @@
+{
+  "n_questions": 500,
+  "n_abs": 30,
+  "qtypes": {
+    "single-session-user": 70,
+    "multi-session": 133,
+    "single-session-preference": 30,
+    "temporal-reasoning": 133,
+    "knowledge-update": 78,
+    "single-session-assistant": 56
+  },
+  "n_sessions_total": 23867,
+  "n_turns_total": 246750,
+  "n_user_turns": 122416,
+  "n_gold_turns": 842,
+  "n_noans_flagged": 4637,
+  "chars_user_turns": 30724304,
+  "max_user_turn_chars": 76560,
+  "turns_per_q_avg": 244.8,
+  "turns_per_q_max": 305
+}
