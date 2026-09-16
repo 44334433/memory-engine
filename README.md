@@ -52,6 +52,36 @@ We ran a framework in production and hit exactly that wall: compressed context d
 
 Single binary process, single database, no external services. The embedder is warm-resident; cold-start warmup is part of the health check (`/v1/health` asserts db + model + warm + ready, all four).
 
+## What's inside
+
+| Capability | How it works | Hard numbers |
+|---|---|---|
+| **Four-route recall** | dense vector + PGroonga CJK full-text + temporal routing + one-hop graph pull-back, fused by weighted RRF | hybrid beats BM25 by +12.4pp (see Benchmark) |
+| **Auditable scoring** | every hit ships `score_parts` — per-route rank, freshness factor, staleness factor, tier weight | no black-box ranking |
+| **Bi-temporal memory** | `valid_at` / `invalid_at` on every entry; corrections *supersede* — old rows are never deleted | history is replayable |
+| **Write protection** | prompt-injection gate (external content scanned, `external_only` default) + exact-hash and semantic dedup (cos ≥ 0.97 vs last 30 days) + source-tier downweighting (web 0.85, cron 0.9) | poisoned input never becomes trusted memory |
+| **Visibility model** | caller-scoped: `main` / per-agent / subagent see disjoint views; `private` entries invisible to non-owners | zero cross-host leakage |
+| **Graceful degradation** | embedder failure → explicit fts-only mode (200 + `degraded` + `failed_routes`), self-heal thread retries every 60 s and pulls vector recall back | degraded ≠ dead, and it says so |
+| **Lifecycle TTL** | six-state machine (trial → active → … → retired → deleted): adoption extends life, 90 days of zero access decays | unused memory stops costing quality |
+| **Disaster recovery** | PG snapshots + timer, plus full logical export (`GET /v1/export`) | RTO measured at 2.5 s |
+| **Multi-host ready** | `tenant_id` / `agent_id` columns already in schema; isolation enforcement lands when a second host actually connects | schema now, enforcement on trigger |
+| **Embedder swap** | pluggable: local Qwen3 or any OpenAI-compatible endpoint, one config line | re-embedding versioned via `embed_ver` |
+
+## API surface
+
+```
+POST /v1/retain            write (dedup + injection scan + tiering)     → ids, dedup_skipped
+POST /v1/recall            four-route hybrid search                     → results + score_parts + routes
+POST /v1/freshness/digest  what changed since my last cursor            → budgeted, domain-scoped
+GET  /v1/memories          list/filter (bank, domain, state, time)      → paginated
+GET  /v1/memories/{id}     single entry + full provenance
+PATCH /v1/memories/{id}    update fields (re-embeds when body changes)
+POST /v1/adopt             report host adoption (feeds use-it-or-lose-it)
+DELETE /v1/memories/{id}   retire (soft), `?purge=true` for hard delete
+GET  /v1/export            full JSONL export (logical backup)
+GET  /v1/health            four-truth check: db + model + warm + ready
+```
+
 ## Self-evolution
 
 The engine tunes itself from its own traffic — four loops, all running today:
