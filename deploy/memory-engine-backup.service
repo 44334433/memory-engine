@@ -1,0 +1,10 @@
+[Unit]
+Description=memory-engine daily backup (pg_dump -Fc + WAL sync; local 7d + external 90d)
+After=memory-engine.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/memory-engine backup
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal

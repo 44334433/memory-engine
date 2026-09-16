@@ -1,0 +1,93 @@
+-- memory-engine DDL v1（蓝图 §3.1 + 2026-09-16 先知拍板追加：original_date + staleness 时效字段）
+-- 库：memengine @ 127.0.0.1:5433（专用实例 cluster=memengine）
+-- 扩展由 postgres superuser 预建：vector / pgroonga / pg_trgm / pg_prewarm
+-- schema_ver = 1
+
+CREATE TABLE IF NOT EXISTS memories (
+  id            uuid PRIMARY KEY,                  -- UUIDv7（应用侧生成，时间有序）
+  seq           bigint GENERATED ALWAYS AS IDENTITY UNIQUE,  -- 全局单调游标（changelog 水位对齐）
+  schema_ver    int  NOT NULL DEFAULT 1,
+  bank          text NOT NULL CHECK (bank IN ('hermes','hermes-sessions','knowledge','reflection')),
+  domain        text NOT NULL DEFAULT 'general',
+  trigger_term  text,                              -- 用户字段「trigger」；PG 保留字→列名 trigger_term
+  title         text NOT NULL,
+  body          text NOT NULL,                     -- 正文真源（大体积外置走 body_ptr）
+  body_seg      text,                              -- 兼容占位：PGroonga 内建分词后可空置（蓝图 §22.5）
+  body_ptr      text,                              -- file:// 或 obsidian:// 知识卡锚点（蓝图 §12，只读）
+  tags          jsonb NOT NULL DEFAULT '[]',
+  owner         text NOT NULL DEFAULT 'main',      -- main|subagent:<id>|cron:<job_id>|sumeru|user
+  visibility    text NOT NULL DEFAULT 'agent'
+                CHECK (visibility IN ('public','agent','private')),
+  source_type   text NOT NULL,                     -- conversation|cron|doc|manual|migration
+  source_ref    text,                              -- 上游系统 document_id(迁移保留)/会话ID/路径
+  priority      int  NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
+  ttl_state     text NOT NULL DEFAULT 'candidate'
+                CHECK (ttl_state IN ('candidate','trial','active','decaying','archived','retired')),
+  ttl_expires_at timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+  last_accessed_at timestamptz,
+  access_count  bigint NOT NULL DEFAULT 0,
+  adopt_count   bigint NOT NULL DEFAULT 0,
+  last_verified timestamptz,
+  verify_status text NOT NULL DEFAULT 'unverified'
+                CHECK (verify_status IN ('verified','stale','unverified')),
+  load_hint     text,
+  -- —— 时效字段（2026-09-16 拍板追加，阶段3 迁移按源时间戳回填）——
+  original_date timestamptz,                       -- 源条目创建时间（迁移=源系统 created_at）
+  staleness     text NOT NULL DEFAULT 'fresh'
+                CHECK (staleness IN ('fresh','aging','stale'))  -- fresh ≤30d / aging 30-90d / stale >90d
+                ,                                  -- 降权：fresh×1.0 / aging×0.9 / stale×0.7
+  embed_model   text NOT NULL,                     -- 'Qwen/Qwen3-Embedding-0.6B'
+  embed_dim     int  NOT NULL,                     -- 1024
+  embed_ver     int  NOT NULL DEFAULT 1,           -- 重嵌批次版本（换模唯一豁免通道）
+  content_hash  text NOT NULL,                     -- sha256(bank + body) 精确判重
+  search_text   text GENERATED ALWAYS AS (title || ' ' || body) STORED,  -- FTS 索引列
+  embedding     vector(1024)                       -- pgvector 列
+);
+
+CREATE INDEX IF NOT EXISTS idx_mem_bank_state ON memories (bank, ttl_state);
+CREATE INDEX IF NOT EXISTS idx_mem_owner_vis  ON memories (owner, visibility);
+CREATE INDEX IF NOT EXISTS idx_mem_updated    ON memories (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mem_hash       ON memories (content_hash);
+CREATE INDEX IF NOT EXISTS idx_mem_tags       ON memories USING gin (tags jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_mem_stale      ON memories (staleness);
+
+-- 向量路：HNSW 按 bank 部分索引（=sqlite-vec 分区语义的 PG 等价物）
+CREATE INDEX IF NOT EXISTS idx_vec_knowledge ON memories USING hnsw (embedding vector_cosine_ops)
+  WHERE bank = 'knowledge';
+CREATE INDEX IF NOT EXISTS idx_vec_hermes    ON memories USING hnsw (embedding vector_cosine_ops)
+  WHERE bank = 'hermes';
+CREATE INDEX IF NOT EXISTS idx_vec_sessions  ON memories USING hnsw (embedding vector_cosine_ops)
+  WHERE bank = 'hermes-sessions';
+CREATE INDEX IF NOT EXISTS idx_vec_reflection ON memories USING hnsw (embedding vector_cosine_ops)
+  WHERE bank = 'reflection';
+
+-- 全文路：PGroonga 内建 CJK 分词（默认 TokenBigram，CJK bigram；tokenizer 定档留待评测集判优，蓝图 §22.5）
+CREATE INDEX IF NOT EXISTS idx_mem_fts ON memories
+  USING pgroonga (search_text pgroonga_text_full_text_search_ops_v2);
+
+CREATE TABLE IF NOT EXISTS changelog (
+  seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ts timestamptz NOT NULL DEFAULT now(),
+  op text NOT NULL,                  -- retain|update|lifecycle|delete|consolidate|reembed
+  memory_id uuid, detail jsonb
+);
+CREATE TABLE IF NOT EXISTS access_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  memory_id uuid NOT NULL, ts timestamptz NOT NULL DEFAULT now(),
+  kind text NOT NULL,                -- recall_hit|adopted|injected
+  caller text, query text
+);
+CREATE INDEX IF NOT EXISTS idx_ae_mid ON access_events (memory_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_ae_kind_ts ON access_events (kind, ts DESC);
+CREATE TABLE IF NOT EXISTS engine_meta (key text PRIMARY KEY, value jsonb NOT NULL);
+
+-- engine_meta 种子（幂等）
+INSERT INTO engine_meta(key, value) VALUES
+  ('schema_ver', '1'::jsonb),
+  ('embed_model', '"Qwen/Qwen3-Embedding-0.6B"'::jsonb),
+  ('embed_dim', '1024'::jsonb),
+  ('embed_ver', '1'::jsonb),
+  ('mode', '"normal"'::jsonb)
+ON CONFLICT (key) DO NOTHING;

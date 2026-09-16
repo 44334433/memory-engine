@@ -1,0 +1,23 @@
+[Unit]
+Description=Memory Engine (PG18@5433 + three-way recall + Qwen3-0.6B fp16 CUDA)
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/memory-engine serve
+ExecStartPost=%h/.local/bin/memory-engine wait-ready --timeout 120
+Restart=always
+RestartSec=2
+MemoryMax=4G
+# 默认 8766；与其他服务端口冲突时改此行
+Environment=MEMORY_ENGINE_PORT=8766
+Environment=HF_ENDPOINT=https://hf-mirror.com
+Environment=HF_HUB_DISABLE_XET=1
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+WatchdogSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

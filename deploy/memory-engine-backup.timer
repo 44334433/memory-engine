@@ -1,0 +1,11 @@
+[Unit]
+Description=memory-engine daily backup timer (04:10, 蓝图 §10)
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=memory-engine-backup.service
+
+[Install]
+WantedBy=timers.target

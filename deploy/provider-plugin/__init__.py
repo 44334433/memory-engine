@@ -1,0 +1,399 @@
+"""MemoryEngineProvider —— 自建记忆引擎 memory provider（阶段3切主，2026-09-16）。
+
+对齐旧版记忆 provider 的能力面（参照宿主框架 agent/memory_provider.py ABC 接口）：
+
+- prefetch(query)          每轮 recall → 注入 <memory> 段（同步直查，引擎本地 pgvector 毫秒级）
+- queue_prefetch(query)    后台预热下一轮（recall_sync=false 时启用）
+- sync_turn(u, a)          会话轮缓冲 → 每 20 轮批量 retain 到 hermes-sessions bank（writer 线程，不阻塞回复路径）
+- on_pre_compress(msgs)    压缩前：摘录 retain（tags=compression-preflush）+ recall 注入摘要 prompt（≤1200 字符）
+- on_session_switch(...)   flush-on-switch：旧会话缓冲落库 + 轮换 session 状态
+- on_session_end(msgs)     会话结束 flush 缓冲（防丢末段）
+- engine_recall/engine_retain 两个工具（tools 能力面）
+- shutdown()               flush + writer 排空
+
+所有网络/解析路径 fail-open：引擎不可达 → 注入空串/静默，绝不阻塞 agent。
+bank 映射：会话轮→hermes-sessions；手动/工具 retain→hermes；recall=跨库（bank=null）。
+配置：MEMORY_ENGINE_URL（默认 http://localhost:8766），MEMORY_ENGINE_HOME/memory-engine/provider.json 可覆盖。
+"""
+
+from __future__ import annotations
+
+import contextvars
+import json
+import logging
+import os
+import queue
+import threading
+import time
+import urllib.request
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from agent.memory_provider import MemoryProvider, RecallStatus
+
+__all__ = ["MemoryEngineProvider"]
+
+logger = logging.getLogger("memory-engine")
+
+_DEFAULT_URL = "http://localhost:8766"
+_GLYPH = "🧠"
+
+
+def _load_provider_config() -> dict:
+    """provider.json > env > 默认。"""
+    cfg: dict = {"url": _DEFAULT_URL, "auto_recall": True, "recall_sync": True,
+                 "retain_every_n_turns": 20, "recall_top_k": 6,
+                 "session_bank": "hermes-sessions", "manual_bank": "hermes",
+                 "recall_max_chars": 2000}
+    try:
+        base = os.environ.get("MEMORY_ENGINE_DIR") or os.path.join(
+            os.environ.get("MEMORY_ENGINE_HOME", os.path.expanduser("~/hermes-data")), "memory-engine")
+        p = os.path.join(base, "provider.json")
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                cfg.update({k: v for k, v in json.load(f).items() if k in cfg})
+    except Exception:
+        pass
+    cfg["url"] = str(os.environ.get("MEMORY_ENGINE_URL") or cfg["url"]).rstrip("/")
+    return cfg
+
+
+class MemoryEngineProvider(MemoryProvider):
+    def __init__(self) -> None:
+        self._cfg = _load_provider_config()
+        self._session_id = ""
+        self._parent_session_id = ""
+        self._turn_buffer: List[str] = []          # 每元素=一轮 user+assistant 文本
+        self._turn_counter = 0
+        self._buf_lock = threading.Lock()
+        self._writer_queue: "queue.Queue[object]" = queue.Queue()
+        self._writer_thread: Optional[threading.Thread] = None
+        self._prefetch_thread: Optional[threading.Thread] = None
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_result = ""
+        self._prefetch_count = 0
+        self._last_recall_returned = False
+        self._last_recall_count = 0
+        self._shutting_down = threading.Event()
+
+    # ---------- 基础 ----------
+    @property
+    def name(self) -> str:
+        return "memory-engine"
+
+    def is_available(self) -> bool:
+        try:
+            with urllib.request.urlopen(f"{self._cfg['url']}/v1/health", timeout=2.5) as resp:
+                return json.loads(resp.read().decode()).get("status") == "ok"
+        except Exception:
+            return False
+
+    def unavailable_reason(self) -> str:
+        return f"memory-engine daemon 不可达（{self._cfg['url']}/v1/health）"
+
+    def backup_paths(self) -> List[str]:
+        base = os.environ.get("MEMORY_ENGINE_DIR") or os.path.join(
+            os.environ.get("MEMORY_ENGINE_HOME", os.path.expanduser("~/hermes-data")), "memory-engine")
+        return [os.path.join(base, "backups")]
+
+    # ---------- 生命周期 ----------
+    def initialize(self, session_id: str, **kwargs: Any) -> None:
+        self._session_id = str(session_id or "").strip()
+        logger.debug("memory-engine provider init session=%s url=%s", self._session_id, self._cfg["url"])
+
+    def _post(self, path: str, payload: dict, timeout: float = 15.0) -> Optional[dict]:
+        try:
+            req = urllib.request.Request(
+                f"{self._cfg['url']}{path}",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            logger.debug("memory-engine POST %s failed: %s", path, e)
+            return None
+
+    # ---------- recall / prefetch ----------
+    def _do_recall(self, query: str) -> tuple[str, int]:
+        # caller="main"：与主 agent 同身份（引擎可见性闸下 main 全见；migration 行 owner≠provider）
+        resp = self._post("/v1/recall", {"query": query, "bank": None,
+                                         "caller": "main",
+                                         "top_k": self._cfg["recall_top_k"]})
+        if not resp:
+            return "", 0
+        results = resp.get("results") or []
+        lines: List[str] = []
+        used = 0
+        cap = self._cfg["recall_max_chars"]
+        for i, r in enumerate(results, 1):
+            title = (r.get("title") or "").strip()
+            body = (r.get("body") or "").strip()
+            meta = f"[{i}] ({r.get('bank', '?')}/{r.get('staleness', '?')}) {title}"
+            room = max(60, cap - used - len(meta) - 4)
+            seg = meta + "\n" + body[:room]
+            lines.append(seg)
+            used += len(seg) + 2
+            if used >= cap:
+                break
+        text = "\n\n".join(lines)
+        return text, len(results)
+
+    def _format_recall(self, text: str) -> str:
+        if not text:
+            return ""
+        return (f"<memory engine=memory-engine>\n{text}\n</memory>")
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        if session_id:
+            self._session_id = str(session_id).strip()
+        if not self._cfg["auto_recall"] or self._shutting_down.is_set():
+            self._record_recall_indicator(returned=False, count=0)
+            return ""
+        if self._cfg["recall_sync"]:
+            text, count = self._do_recall(query)
+            self._record_recall_indicator(returned=bool(text), count=count)
+            return self._format_recall(text)
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join(timeout=3.0)
+        with self._prefetch_lock:
+            result, count = self._prefetch_result, self._prefetch_count
+            self._prefetch_result, self._prefetch_count = "", 0
+        self._record_recall_indicator(returned=bool(result), count=count)
+        return self._format_recall(result)
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        if self._cfg["recall_sync"] or not self._cfg["auto_recall"]:
+            return
+        if self._shutting_down.is_set():
+            return
+
+        def _run():
+            text, count = self._do_recall(query)
+            if text:
+                with self._prefetch_lock:
+                    self._prefetch_result = text
+                    self._prefetch_count = count
+
+        self._prefetch_thread = threading.Thread(
+            target=contextvars.copy_context().run, args=(_run,),
+            daemon=True, name="memory-engine-prefetch")
+        self._prefetch_thread.start()
+
+    def recall_status(self) -> Optional[RecallStatus]:
+        if not self._last_recall_returned:
+            return None
+        return RecallStatus(provider_label="MemoryEngine", count=self._last_recall_count, glyph=_GLYPH)
+
+    def _record_recall_indicator(self, *, returned: bool, count: int) -> None:
+        self._last_recall_returned = returned
+        self._last_recall_count = count
+
+    # ---------- 写路径 ----------
+    def _ensure_writer(self) -> None:
+        if self._writer_thread and self._writer_thread.is_alive():
+            return
+        self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True,
+                                               name="memory-engine-writer")
+        self._writer_thread.start()
+
+    def _writer_loop(self) -> None:
+        while True:
+            job = self._writer_queue.get()
+            if job is None:
+                return
+            try:
+                job()
+            except Exception as e:
+                logger.debug("memory-engine writer job failed: %s", e)
+
+    def _build_turn_text(self, user_content: str, assistant_content: str) -> str:
+        u = (user_content or "").strip()[:4000]
+        a = (assistant_content or "").strip()[:4000]
+        return f"[user] {u}\n[assistant] {a}"
+
+    def _flush_locked(self, bank: str, tags: List[str], context_prefix: str) -> None:
+        """把当前缓冲作为批量 retain 提交到 writer 队列（每轮对话=1 条 item）。"""
+        items = []
+        for idx, turn_text in enumerate(self._turn_buffer, 1):
+            items.append({
+                "content": turn_text,
+                "context": f"{context_prefix} turn:{self._turn_counter - len(self._turn_buffer) + idx}",
+                "tags": tags,
+                "source_type": "session",
+            })
+        self._turn_buffer = []
+        if not items:
+            return
+        bank_snap, sid_snap = bank, self._session_id
+
+        def _do():
+            self._post("/v1/retain", {"bank": bank_snap, "caller": "provider-session",
+                                      "items": items, "dedup": True}, timeout=60)
+
+        self._ensure_writer()
+        self._writer_queue.put(_do)
+
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
+                  messages: Optional[List[Dict[str, Any]]] = None) -> None:
+        if self._shutting_down.is_set():
+            return
+        if session_id:
+            self._session_id = str(session_id).strip()
+        with self._buf_lock:
+            self._turn_buffer.append(self._build_turn_text(user_content, assistant_content))
+            self._turn_counter += 1
+            if self._turn_counter % self._cfg["retain_every_n_turns"] != 0:
+                return
+            tags = ["session"] + ([f"session:{self._session_id}"] if self._session_id else [])
+            self._flush_locked(self._cfg["session_bank"], tags,
+                               f"session {self._session_id}")
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        try:
+            with self._buf_lock:
+                if not self._turn_buffer:
+                    return
+                tags = ["session", "session-end"] + ([f"session:{self._session_id}"] if self._session_id else [])
+                self._flush_locked(self._cfg["session_bank"], tags,
+                                   f"session {self._session_id} end")
+        except Exception as e:
+            logger.debug("on_session_end flush failed: %s", e)
+
+    def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "",
+                          reset: bool = False, **kwargs: Any) -> None:
+        new_id = str(new_session_id or "").strip()
+        if not new_id:
+            return
+        try:
+            with self._buf_lock:
+                if self._turn_buffer:
+                    old_sid = self._session_id
+                    tags = ["session", "flush-on-switch"] + ([f"session:{old_sid}"] if old_sid else [])
+                    self._flush_locked(self._cfg["session_bank"], tags,
+                                       f"session {old_sid} pre-switch")
+            if self._prefetch_thread and self._prefetch_thread.is_alive():
+                self._prefetch_thread.join(timeout=3.0)
+            with self._prefetch_lock:
+                self._prefetch_result = ""
+            if parent_session_id:
+                self._parent_session_id = str(parent_session_id).strip()
+            self._session_id = new_id
+            logger.debug("memory-engine on_session_switch new=%s parent=%s",
+                         new_id, self._parent_session_id)
+        except Exception as e:
+            logger.debug("on_session_switch failed: %s", e)
+
+    # ---------- 压缩 ----------
+    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        """压缩前：窗口摘录 retain + recall 注入摘要 prompt（失败静默返回 ""）。"""
+        try:
+            window = messages[-6:] if messages else []
+            excerpt_parts = []
+            for m in window:
+                role = m.get("role", "?")
+                content = str(m.get("content") or "")[:600]
+                if content.strip():
+                    excerpt_parts.append(f"[{role}] {content.strip()}")
+            excerpt = "\n".join(excerpt_parts)[:1500]
+            sid = self._session_id
+            if excerpt:
+                tags = ["compression-preflush"] + ([f"session:{sid}"] if sid else [])
+                self._post("/v1/retain", {
+                    "bank": self._cfg["session_bank"], "caller": "provider-compress",
+                    "items": [{"content": excerpt,
+                               "context": f"compression preflush {sid} "
+                                          f"{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                               "tags": tags, "source_type": "compression"}],
+                    "dedup": True}, timeout=30)
+            anchor = ""
+            for m in reversed(messages or []):
+                if m.get("role") == "user":
+                    anchor = str(m.get("content") or "")[:120]
+                    break
+            text, count = self._do_recall(f"会话关键状态 计划 决策 待办 {anchor}")
+            self._record_recall_indicator(returned=bool(text), count=count)
+            return text[:1200]
+        except Exception as e:
+            logger.debug("on_pre_compress failed: %s", e)
+            return ""
+
+    # ---------- 工具面 ----------
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "engine_recall", "description": "语义检索记忆引擎（跨库）",
+             "input_schema": {"type": "object",
+                              "properties": {"query": {"type": "string"},
+                                             "top_k": {"type": "integer", "default": 6}},
+                              "required": ["query"]}},
+            {"name": "engine_retain", "description": "写入一条长期记忆到引擎 hermes 库",
+             "input_schema": {"type": "object",
+                              "properties": {"content": {"type": "string"},
+                                             "context": {"type": "string"},
+                                             "tags": {"type": "array", "items": {"type": "string"}}},
+                              "required": ["content", "context"]}},
+        ]
+
+    def handle_tool_call(self, tool_name: str, args: dict, **kwargs: Any) -> str:
+        args = args or {}
+        if tool_name == "engine_recall":
+            top_k = args.get("top_k") or self._cfg["recall_top_k"]
+            resp = self._post("/v1/recall", {"query": str(args.get("query", "")), "bank": None,
+                                             "caller": "main", "top_k": max(1, min(int(top_k), 20))})
+            if not resp:
+                return "记忆引擎不可达"
+            out = []
+            for i, r in enumerate(resp.get("results") or [], 1):
+                out.append(f"[{i}] ({r.get('bank', '?')}/{r.get('staleness', '?')}) "
+                           f"{(r.get('title') or '')[:80]}\n{(r.get('body') or '')[:500]}")
+            return "\n\n".join(out) or "（无命中）"
+        if tool_name == "engine_retain":
+            resp = self._post("/v1/retain", {
+                "bank": self._cfg["manual_bank"], "caller": "tool",
+                "items": [{"content": str(args.get("content", "")),
+                           "context": str(args.get("context", "manual retain")),
+                           "tags": list(args.get("tags") or []), "source_type": "manual"}],
+                "dedup": True})
+            if not resp:
+                return "写入失败：记忆引擎不可达"
+            return f"已写入 {len(resp.get('ids') or [])} 条（dedup 跳过 {resp.get('dedup_skipped', 0)}）"
+        return f"未知工具: {tool_name}"
+
+    # ---------- 收尾 ----------
+    def shutdown(self) -> None:
+        logger.debug("memory-engine shutdown: flush + drain")
+        try:
+            self.on_session_end([])
+        except Exception:
+            pass
+        try:
+            self._shutting_down.set()
+            self._writer_queue.put(None)
+            if self._writer_thread and self._writer_thread.is_alive():
+                self._writer_thread.join(timeout=5.0)
+        except Exception:
+            pass
+
+    # ---------- 配置面板 ----------
+    def get_config_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"key": "url", "label": "Engine URL", "type": "string", "value": self._cfg["url"]},
+            {"key": "auto_recall", "label": "每轮自动 recall 注入", "type": "bool", "value": self._cfg["auto_recall"]},
+            {"key": "retain_every_n_turns", "label": "每 N 轮落库", "type": "int", "value": self._cfg["retain_every_n_turns"]},
+            {"key": "recall_top_k", "label": "recall 条数", "type": "int", "value": self._cfg["recall_top_k"]},
+        ]
+
+    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        cfg_dir = os.path.join(hermes_home, "memory-engine")
+        os.makedirs(cfg_dir, exist_ok=True)
+        path = os.path.join(cfg_dir, "provider.json")
+        current: dict = {}
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    current = json.load(f)
+            except Exception:
+                current = {}
+        current.update({k: v for k, v in values.items() if k in self._cfg})
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(current, f, ensure_ascii=False, indent=1)
+        self._cfg = _load_provider_config()

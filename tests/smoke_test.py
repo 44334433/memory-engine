@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""阶段1 自测套件（任务⑥）：retain 20 中文 → recall 三路验证 → PATCH/DELETE → P95(50) → 重启恢复。
+消费者纪律：全走 HTTP（127.0.0.1），禁 import 旁路；仅末尾直接 psql 读 access_events/changelog 做对账（只读）。
+用法：MEMORY_ENGINE_PORT=8766 /usr/bin/python3 tests/smoke_test.py
+"""
+import http.client
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("MEMORY_ENGINE_PORT", "8766"))
+RESULTS = {"port": PORT, "checks": {}, "p95": None, "fail": []}
+
+
+def req(method: str, path: str, body: dict | None = None, timeout: float = 30) -> tuple[int, dict]:
+    conn = http.client.HTTPConnection(HOST, PORT, timeout=timeout)
+    payload = json.dumps(body).encode() if body is not None else None
+    conn.request(method, path, payload, {"Content-Type": "application/json"})
+    r = conn.getresponse()
+    data = r.read().decode()
+    conn.close()
+    try:
+        parsed = json.loads(data) if data else {}
+    except json.JSONDecodeError:
+        parsed = {"raw": data[:300]}
+    return r.status, parsed if isinstance(parsed, dict) else {"list": parsed}
+
+
+def check(name: str, ok: bool, detail=""):
+    RESULTS["checks"][name] = {"ok": ok, "detail": detail}
+    if not ok:
+        RESULTS["fail"].append(name)
+    print(("✓" if ok else "✗"), name, detail if not ok else "")
+
+
+ITEMS = [
+    ("knowledge", "pgvector HNSW 按 bank 建部分索引可裁剪扫描面，四库各建一个 HNSW 索引对应四路检索", "存储选型·pgvector", ["pgvector", "HNSW"], "memory-engine", 4, None),
+    ("knowledge", "PGroonga 内建 CJK 分词，中文全文检索无需外置 jieba 预分词，TokenBigram 为默认分词器", "存储选型·PGroonga", ["pgroonga", "中文检索"], "memory-engine", 4, None),
+    ("knowledge", "RRF 倒数排名融合：多路召回按 1/(60+rank) 加权求和，对异构分数天然鲁棒", "检索算法·RRF", ["RRF", "融合排序"], "memory-engine", 3, None),
+    ("knowledge", "UUIDv7 前段是毫秒时间戳，做主键天然时间有序，B树索引写入局部性好", "工程·UUIDv7", ["uuid"], "memory-engine", 3, None),
+    ("knowledge", "pg_dump -Fc 自定义格式支持压缩与并行恢复，pg_restore --list 可先校验归档目录再恢复", "运维·备份", ["pg_dump", "备份"], "memory-engine", 3, None),
+    ("knowledge", "HNSW 图索引查询复杂度近对数，构建时 m 参数控制每层邻居数，ef_search 权衡召回与延迟", "存储选型·HNSW", ["hnsw"], "memory-engine", 3, None),
+    ("hermes", "示例记忆A：沟通偏好类条目（合成测试数据，结论先行）", "示例·偏好", ["demo"], "demo-profile", 5, None),
+    ("hermes", "示例记忆B：工作纪律类条目（合成测试数据，一次做到位优先）", "示例·纪律", ["demo"], "demo-rule", 5, None),
+    ("hermes", "示例记忆C：网络环境类条目（合成测试数据，出网先探路由）", "示例·网络", ["demo"], "network", 4, None),
+    ("hermes", "示例记忆D：备份纪律条目（合成测试数据，真源必须异盘备份）", "示例·备份", ["备份"], "ops", 4, None),
+    ("hermes-sessions", "会话示例：对齐记忆引擎架构——PG18+pgvector+PGroonga 三路召回，daemon 端口可配置", "会话·架构对齐", ["架构"], "sessions", 3, None),
+    ("hermes-sessions", "会话示例：嵌入模型选型——0.6B 级 fp16 常驻显存约 2-3GB，向量维度 1024", "会话·选型", ["embedding"], "sessions", 3, None),
+    ("reflection", "教训：断言前必须实证，管道里的 $? 是最后一个命令的退出码，会吞掉真实失败", "反思·工程纪律", ["教训"], "methodology", 4, None),
+    ("reflection", "反思：Socks 代理环境变量会泄漏到 Python httpx 导致 ImportError，直连场景应显式 unset", "反思·环境", ["教训"], "methodology", 3, None),
+    ("reflection", "复盘：多实例共享端口前先 ss -ltnp 探测，蓝图端口规划要与在跑服务对账", "反思·部署", ["教训"], "methodology", 3, None),
+    ("knowledge", "systemd Type=notify 要求服务就绪后主动发 READY=1，配合 WatchdogSec 需周期发 WATCHDOG=1 心跳", "工程·systemd", ["systemd"], "memory-engine", 3, None),
+    ("knowledge", "PostgreSQL generate column STORED 列可被 PGroonga 直接建全文索引，中文搜索开箱即用", "存储·PG特性", ["postgres"], "memory-engine", 2, None),
+    ("hermes", "示例记忆E：时效分级——fresh 三十天以内、aging 三十天到九十天、stale 九十天以上分级降权", "示例·时效", ["时效"], "memory-engine", 4, None),
+    ("hermes-sessions", "会话示例：验收线——recall P95 两百毫秒以内硬指标，预热失败等于启动失败", "会话·验收", ["验收"], "sessions", 4, None),
+    ("reflection", "观察：时间序列回测要先冻结切片再跑策略，防止未来函数污染信号统计", "反思·方法", ["回测"], "methodology", 2, "2026-07-28T10:00:00+08:00"),  # stale >90d
+]
+
+SEMANTIC_QUERIES = [
+    "怎么给记忆条目做向量近似搜索",
+    "中文分词全文检索用什么方案",
+    "多路召回结果怎么合并排序",
+    "备份归档怎么校验可用",
+    "模型常驻显卡要占多少内存",
+]
+FTS_QUERY = "TokenBigram"
+TIME_QUERY = "zzz-无语义无关词-9x7qz"
+
+
+def main() -> int:
+    # 1) health
+    st, h = req("GET", "/v1/health")
+    check("health.ready", st == 200 and h.get("db") and h.get("model_loaded") and h.get("warm"), str(h)[:200])
+    RESULTS["health"] = h
+
+    # 2) retain 20 条中文（按 ITEMS 的 bank 分组，真实验证四库部分 HNSW 索引；断言幂等=ids+dedup）
+    st, r = req("POST", "/v1/retain", {"bank": "knowledge", "caller": "main", "items": [
+        {"content": ITEMS[0][1], "context": "批量写入", "tags": []}]})
+    check("retain.single", st == 200 and len(r.get("ids", [])) + r.get("dedup_skipped", 0) == 1, f"{st} {r}")
+    by_bank: dict[str, list] = {}
+    for (_b, c, ctx, tags, dom, pri, od) in ITEMS:
+        item = {"content": c, "context": ctx, "tags": tags, "domain": dom,
+                "priority": pri, "source_type": "manual"}
+        if od:
+            item["original_date"] = od
+        by_bank.setdefault(_b, []).append(item)
+    total_ids, total_skip = 0, 0
+    for b, its in by_bank.items():
+        st, r = req("POST", "/v1/retain", {"bank": b, "caller": "main", "items": its})
+        total_ids += len(r.get("ids", []))
+        total_skip += r.get("dedup_skipped", 0)
+    check("retain.batch20", st == 200 and total_ids + total_skip == 20,
+          f"st={st} ids={total_ids} skipped={total_skip}")
+    st, r2 = req("POST", "/v1/retain", {"bank": "knowledge", "caller": "main", "items": [
+        {"content": ITEMS[1][1], "context": "重复写入测试"}]})
+    check("retain.dedup_hash", st == 200 and r2.get("dedup_skipped") == 1, f"{r2}")
+    near = ITEMS[2][1].replace("，", ", ")
+    st, r3 = req("POST", "/v1/retain", {"bank": "knowledge", "caller": "main", "items": [
+        {"content": near, "context": "语义近似判重测试"}]})
+    check("retain.dedup_semantic(info)", st == 200, f"dedup_skipped={r3.get('dedup_skipped')}（近重复信息项）")
+    st, r4 = req("POST", "/v1/retain", {"bank": "knowledge", "caller": "main", "items": [
+        {"content": "没有上下文的记忆", "context": "   "}]})
+    check("retain.context_422", st == 422, f"{st} {r4}")
+    st, r5 = req("POST", "/v1/retain", {"bank": "bad-bank", "caller": "main", "items": [
+        {"content": "非法bank测试", "context": "bank校验"}]})
+    check("retain.bank_422", st == 422, str(st))
+    # 可见性测试条目（private + agent）
+    st, r6 = req("POST", "/v1/retain", {"bank": "hermes", "caller": "main", "items": [
+        {"content": "机密条目：私有可见性测试专用内容 qzx9", "context": "可见性测试", "visibility": "private"},
+        {"content": "时效降权测试：三个月前的旧结论应被降权 vqx7", "context": "时效测试", "original_date": "2026-05-10T00:00:00+08:00"}]})
+    check("retain.vis_and_stale_items", st == 200 and len(r6.get("ids", [])) + r6.get("dedup_skipped", 0) == 2, f"{r6}")
+
+    # 3) recall 三路验证
+    for i, q in enumerate(SEMANTIC_QUERIES):
+        st, r = req("POST", "/v1/recall", {"query": q, "caller": "main", "top_k": 5})
+        top = (r.get("results") or [{}])[0]
+        parts = top.get("score_parts", {})
+        check(f"recall.semantic[{i}]", st == 200 and bool(top) and "rrf" in parts,
+              f"{st} took={r.get('took_ms')} routes={r.get('routes')}")
+        if i == 0:
+            RESULTS["semantic_top"] = {"query": q, "title": top.get("title"), "routes": r.get("routes"), "score_parts": parts}
+
+    st, r = req("POST", "/v1/recall", {"query": FTS_QUERY, "caller": "main", "top_k": 5})
+    fts_hit = any("fts" in x["score_parts"]["routes"] for x in r.get("results", []))
+    check("recall.fts_route", st == 200 and fts_hit, f"routes={r.get('routes')}")
+    st, r = req("POST", "/v1/recall", {"query": TIME_QUERY, "caller": "main", "top_k": 5})
+    time_hit = any("time" in x["score_parts"]["routes"] for x in r.get("results", []))
+    check("recall.time_route", st == 200 and time_hit, f"routes={r.get('routes')}（无语义/FTS命中时路C兜底）")
+
+    # 可见性：subagent 看不到 private/他人 agent 条目
+    st, r = req("POST", "/v1/recall", {"query": "私有可见性测试专用内容 qzx9", "caller": "subagent:test-x", "top_k": 10})
+    check("recall.vis_subagent_denied", st == 200 and not r.get("results"), f"{len(r.get('results', []))} 条泄漏")
+    st, r = req("POST", "/v1/recall", {"query": "私有可见性测试专用内容 qzx9", "caller": "main", "top_k": 10})
+    check("recall.vis_main_ok", st == 200 and bool(r.get("results")), "")
+
+    # 时效降权：stale 条目 score_parts.stale == 0.7
+    st, r = req("POST", "/v1/recall", {"query": "三个月前的旧结论应被降权 vqx7", "caller": "main", "top_k": 5})
+    stale_item = next((x for x in r.get("results", []) if "vqx7" in x["title"] + x["body"]), None)
+    check("recall.stale_factor", bool(stale_item) and stale_item["score_parts"]["stale"] == 0.7,
+          f"stale={stale_item and stale_item['score_parts'].get('stale')}")
+
+    # 4) PATCH
+    st, lst = req("GET", "/v1/memories?bank=knowledge&limit=5")
+    mid = lst["items"][0]["id"]
+    old_pri = lst["items"][0]["priority"]
+    st, r = req("PATCH", f"/v1/memories/{mid}", {"priority": 5, "tags": ["patched"]})
+    check("patch.fields", st == 200 and r.get("priority") == 5, f"{st} {r}")
+    st, r = req("PATCH", f"/v1/memories/{mid}", {"body": lst["items"][0]["body"] + "（补一句触发重嵌）"})
+    check("patch.reembed", st == 200 and r.get("has_embedding"), f"{st}")
+    st, r = req("POST", "/v1/recall", {"query": f"{lst["items"][0]["title"]} 补一句触发重嵌",
+                                        "caller": "main", "top_k": 3})
+    check("patch.recall_after_patch", st == 200 and any(x["id"] == mid for x in r.get("results", [])), "")
+
+    # 5) DELETE（retired 语义）+ purge
+    st, r = req("DELETE", f"/v1/memories/{mid}")
+    check("delete.retired", st == 200 and r.get("state") == "retired", f"{r}")
+    st, r = req("POST", "/v1/recall", {"query": f"{lst["items"][0]["title"]} 补一句触发重嵌",
+                                        "caller": "main", "top_k": 5})
+    check("delete.recall_gone", st == 200 and not any(x["id"] == mid for x in r.get("results", [])), "")
+    st, r = req("GET", f"/v1/memories/{mid}")
+    check("delete.get_still_exists", st == 200 and r.get("ttl_state") == "retired" and r.get("has_embedding") is False, f"{r.get('ttl_state')},{r.get('has_embedding')}")
+    st, r = req("DELETE", f"/v1/memories/{mid}?purge=true")
+    check("delete.purge", st == 200 and r.get("state") == "deleted", f"{r}")
+
+    # 6) P95 50 次热查询
+    lat = []
+    for i in range(50):
+        q = SEMANTIC_QUERIES[i % len(SEMANTIC_QUERIES)]
+        t0 = time.perf_counter()
+        st, r = req("POST", "/v1/recall", {"query": q, "caller": "main", "top_k": 10})
+        lat.append((time.perf_counter() - t0) * 1000)
+        assert st == 200, f"recall failed {st}"
+    lat.sort()
+    p50 = statistics.median(lat)
+    p95 = lat[int(len(lat) * 0.95) - 1]
+    RESULTS["p95"] = round(p95, 1)
+    RESULTS["p50"] = round(p50, 1)
+    RESULTS["lat_max"] = round(lat[-1], 1)
+    check("p95.lt200", p95 < 200, f"p50={p50:.1f} p95={p95:.1f} max={lat[-1]:.1f}ms")
+
+    # 7) export 冒烟
+    st, raw = _export()
+    check("export.jsonl", st == 200 and raw.count("\n") >= 21, f"lines={raw.count(chr(10))}")
+
+    # 8) 对账（只读直查：access_events / changelog）
+    import psycopg
+    conn = psycopg.connect(os.environ.get("MEMORY_ENGINE_PG_DSN", "postgresql://memengine@127.0.0.1:5433/memengine"), autocommit=True)
+    with conn.cursor() as cur:
+        cur.execute("SELECT (SELECT count(*) FROM memories), (SELECT count(*) FROM changelog), (SELECT count(*) FROM access_events)")
+        m, c, a = cur.fetchone()
+    conn.close()
+    RESULTS["reconcile"] = {"memories": m, "changelog": c, "access_events": a}
+    check("reconcile.events", a > 0 and c > 20, f"mem={m} changelog={c} access={a}")
+
+    print(json.dumps(RESULTS, ensure_ascii=False, indent=2, default=str)[:3000])
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_smoke.json"), "w") as f:
+        json.dump(RESULTS, f, ensure_ascii=False, indent=2, default=str)
+    return 1 if RESULTS["fail"] else 0
+
+
+def _export() -> tuple[int, str]:
+    conn = http.client.HTTPConnection(HOST, PORT, timeout=30)
+    conn.request("GET", "/v1/export?since_seq=0")
+    r = conn.getresponse()
+    data = r.read().decode()
+    conn.close()
+    return r.status, data
+
+
+if __name__ == "__main__":
+    sys.exit(main())

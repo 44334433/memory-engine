@@ -1,0 +1,24 @@
+# PG18 + pgvector + PGroonga 一体数据库（引擎默认 DSN：postgresql://memengine@127.0.0.1:5433/memengine）
+# 用法：docker compose up -d db && PYTHONPATH=src python3 -m memory_engine.cli serve
+services:
+  db:
+    build: ./docker
+    container_name: memory-engine-db
+    environment:
+      POSTGRES_USER: memengine
+      POSTGRES_DB: memengine
+      POSTGRES_HOST_AUTH_METHOD: trust   # 仅映射到 127.0.0.1，本机开发姿态（生产请改密码认证）
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/00-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+      - ./schema.sql:/docker-entrypoint-initdb.d/20-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memengine -d memengine"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:

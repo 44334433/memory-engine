@@ -1,0 +1,90 @@
+"""配置唯一出口：环境变量可覆盖，默认值=蓝图拍板值。"""
+import os
+from pathlib import Path
+
+HOME = Path.home()
+# 数据根目录：MEMORY_ENGINE_HOME 可覆盖（默认 ~/hermes-data）；MEMORY_ENGINE_DIR 仍可整体指定引擎目录
+ENGINE_HOME = Path(os.environ.get("MEMORY_ENGINE_HOME", str(HOME / "hermes-data")))
+BASE_DIR = Path(os.environ.get("MEMORY_ENGINE_DIR", str(ENGINE_HOME / "memory-engine")))
+MODEL_DIR = Path(os.environ.get("MEMORY_ENGINE_MODEL_DIR", str(BASE_DIR / "models/qwen3-embedding-0.6b")))
+
+HOST = os.environ.get("MEMORY_ENGINE_HOST", "127.0.0.1")
+# 默认 8766；与其他服务端口冲突时改此环境变量
+PORT = int(os.environ.get("MEMORY_ENGINE_PORT", "8766"))
+
+PG_DSN = os.environ.get(
+    "MEMORY_ENGINE_PG_DSN",
+    "postgresql://memengine@127.0.0.1:5433/memengine?sslmode=disable"
+)
+# sslmode=disable（阶段2）：本机回环 + trust 认证无加密必要；实测 PG 端 ssl=on(snakeoil) 时
+# 多线程「关旧连+新建连」并发会在 libpq/OpenSSL 锁上死锁（strace 实证 FUTEX_WAIT 永久等待）。
+
+EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+EMBED_DIM = 1024
+EMBED_DEVICE = os.environ.get("MEMORY_ENGINE_EMBED_DEVICE", "cuda")
+EMBED_MAX_LEN = int(os.environ.get("MEMORY_ENGINE_EMBED_MAXLEN", "2048"))
+EMBED_BATCH = int(os.environ.get("MEMORY_ENGINE_EMBED_BATCH", "16"))
+# Qwen3-Embedding 官方：query 侧拼英文 instruction（+1~5%），document 侧不拼
+EMBED_QUERY_INSTRUCTION = os.environ.get(
+    "MEMORY_ENGINE_EMBED_INSTRUCTION",
+    "Given a memory retrieval query or user context, retrieve the most relevant stored memories",
+)
+
+# —— 三路召回 + RRF（蓝图 §4）——
+RRF_K = 60
+W_VEC, W_FTS, W_TIME = 1.0, 0.8, 0.4
+TOP_VEC, TOP_FTS, TOP_TIME = 60, 60, 30
+# life 因子（蓝图 §4；candidate 视同 trial=0.85；include_archived 时 archived=0.5 可见）
+# decaying=0.7：阶段2 拍板（90d 无触发→decaying 召回降权 0.7；阶段1 曾用 0.6，随本批改版）
+LIFE_WEIGHTS = {
+    "active": 1.0, "trial": 0.85, "candidate": 0.85,
+    "decaying": 0.7, "archived": 0.0, "retired": 0.0,
+}
+LIFE_ARCHIVED_VISIBLE = 0.5
+# verify 修正并入 life（蓝图 §4：stale -5%、verified +2%）
+VERIFY_FACTOR = {"verified": 1.02, "stale": 0.95, "unverified": 1.0}
+# —— 时效降权（2026-09-16 拍板追加；fresh ≤30d / aging 30-90d / stale >90d）——
+STALE_WEIGHTS = {"fresh": 1.0, "aging": 0.9, "stale": 0.7}
+STALE_FRESH_DAYS, STALE_AGING_DAYS = 30, 90
+
+# —— 写入质量闸（蓝图 §4 去重 + context 必填）——
+DEDUP_SIM = float(os.environ.get("MEMORY_ENGINE_DEDUP_SIM", "0.97"))  # cos 相似度阈值
+DEDUP_DAYS = int(os.environ.get("MEMORY_ENGINE_DEDUP_DAYS", "3"))     # 近 N 天语义判重窗口
+
+BANKS = ("hermes", "hermes-sessions", "knowledge", "reflection")
+PRIORITIES = (1, 2, 3, 4, 5)
+
+POOL_MIN = 2
+POOL_MAX = 8
+
+# —— 备份（本盘 backups/ 保留 7 天；外置目录建议异盘挂载，保留 90 天）——
+BACKUP_LOCAL_DIR = Path(os.environ.get("MEMORY_ENGINE_BACKUP_LOCAL", str(BASE_DIR / "backups")))
+BACKUP_EXT_DIR = Path(
+    os.environ.get("MEMORY_ENGINE_BACKUP_EXT", str(ENGINE_HOME / "backup-external"))
+)
+BACKUP_KEEP_LOCAL_DAYS = 7
+BACKUP_KEEP_EXT_DAYS = 90
+
+# —— 生命周期状态机（阶段2；拍板④准入=触发≥3+采纳率≥60%；蓝图 §6）——
+CANDIDATE_DAYS = int(os.environ.get("MEMORY_ENGINE_CANDIDATE_DAYS", "6"))   # 候选期(天)→自动转 trial
+TRIAL_DECAY_DAYS = 30        # trial 30d 无信号 → decaying（蓝图）
+ACTIVE_DECAY_DAYS = 90       # active 90d 无触发/采纳 → decaying（阶段2 拍板）
+DECAY_ARCHIVE_DAYS = 180     # decaying 180d 无信号 → archived（蓝图；hidden 不删）
+REVIVE_WINDOW_DAYS = 3       # decaying 近 3d 有命中/采纳 → 复活 active（蓝图）
+PROMOTE_MIN_HITS = 3         # 近 30d recall_hit ≥3
+PROMOTE_MIN_ADOPT_RATE = 0.6  # 采纳率 adopted/hit ≥60%
+LIFECYCLE_INTERVAL_S = int(os.environ.get("MEMORY_ENGINE_LIFECYCLE_INTERVAL", "600"))
+LIFECYCLE_START_DELAY_S = 60  # 蓝图 §8.2-4：生命周期线程延迟 60s 启动
+
+# —— 整合 consolidate（阶段2；蓝图 §7 /v1/consolidate）——
+CONSOLIDATE_RECENT_DAYS = int(os.environ.get("MEMORY_ENGINE_CONSOLIDATE_DAYS", "14"))
+CONSOLIDATE_SCAN_LIMIT = int(os.environ.get("MEMORY_ENGINE_CONSOLIDATE_LIMIT", "500"))
+CONSOLIDATE_SIM = float(os.environ.get("MEMORY_ENGINE_CONSOLIDATE_SIM", "0.93"))
+
+# —— 本地 WAL 归档滚动清理（阶段2；阶段1 §8 未尽项）——
+WAL_ARCHIVE_DIR = os.environ.get(
+    "MEMORY_ENGINE_WAL_ARCHIVE_DIR", "/var/lib/postgresql/wal_archive_memengine")
+WAL_KEEP_FILES = int(os.environ.get("MEMORY_ENGINE_WAL_KEEP_FILES", "168"))  # ≈7天×24段/天(archive_timeout=3600)
+PG_BIN = "/usr/lib/postgresql/18/bin"
+
+VERSION = "0.2.0-phase2"
