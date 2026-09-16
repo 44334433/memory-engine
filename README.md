@@ -1,5 +1,7 @@
 # memory-engine
 
+English | [简体中文](README.zh-CN.md)
+
 **A lifecycle-managed memory daemon for LLM agents — with source-of-truth anchoring, a freshness protocol, and mechanical write-back verification.**
 
 Not another session-scoped memory store. Most agent memory solutions answer "what did we talk about?" — this one answers "what is still *true*, how fresh is it, and who changed it since I last looked?"
