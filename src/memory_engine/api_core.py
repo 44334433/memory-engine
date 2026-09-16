@@ -7,7 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
-from . import config, db, recall as recall_mod
+from . import config, db, poison_gate, recall as recall_mod
 from .util import content_hash, derive_title, staleness_of, uuid7, vec_to_pg
 
 log = logging.getLogger("memory-engine.api")
@@ -39,6 +39,16 @@ class RetainItem(BaseModel):
     owner: Optional[str] = None
     visibility: str = "agent"
     original_date: Optional[str] = None
+    source_tier: str = "agent"           # 投毒闸：四级来源，缺省=agent（不信任缺省）
+    contains_pii: Optional[bool] = None  # 投毒闸预留：PII 判级待拍板，本批只入库
+
+    @field_validator("source_tier")
+    @classmethod
+    def _source_tier(cls, v: str) -> str:
+        try:
+            return poison_gate.normalize_tier(v)
+        except ValueError as e:
+            raise ValueError(str(e)) from None
 
     @field_validator("context")
     @classmethod
@@ -83,6 +93,18 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
     if not req.items:
         raise HTTPException(422, "items 为空")
     eng = request.app.state.engine
+    # —— 投毒闸①：注入模式扫描（先于嵌入/入库；命中即拒 422 带样本，不吞不静默）——
+    flagged = []
+    for i, it in enumerate(req.items):
+        if poison_gate.should_scan(it.source_tier):
+            hits = poison_gate.scan_injection(f"{it.title or ''}\n{it.content}")
+            if hits:
+                flagged.append({"index": i, "source_tier": it.source_tier, "patterns": hits})
+    if flagged:
+        raise HTTPException(422, detail={
+            "error": "投毒闸：注入模式命中，拒绝入库",
+            "scan_scope": config.INJECTION_SCAN_SCOPE, "items": flagged,
+        })
     vectors = eng.embedder.embed_documents([it.content for it in req.items])
     ids, skipped, maxseq = [], 0, 0
     with pool_conn(eng) as conn:
@@ -98,6 +120,9 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
                     skipped += 1
                     continue
             od = _parse_dt(it.original_date)
+            # —— 投毒闸②：外部来源（agent/web/cron）默认 trial 低信任入场（user 走 candidate）——
+            entry_state = poison_gate.entry_state(it.source_tier)
+            expires_days = config.TRIAL_DECAY_DAYS if entry_state == "trial" else config.CANDIDATE_DAYS
             row = db.insert_memory(
                 conn,
                 id=uuid7(), bank=req.bank, domain=it.domain, trigger_term=it.trigger_term,
@@ -107,7 +132,8 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
                 priority=it.priority, original_date=od, staleness=staleness_of(od),
                 embed_model=config.EMBED_MODEL, embed_dim=config.EMBED_DIM,
                 content_hash=ch, embedding=vec_to_pg(vec),
-                candidate_days=config.CANDIDATE_DAYS,
+                ttl_state=entry_state, ttl_expires_days=expires_days,
+                source_tier=it.source_tier, contains_pii=it.contains_pii,
             )
             ids.append(str(row["id"]))
             maxseq = max(maxseq, row["seq"])
@@ -121,9 +147,20 @@ def recall(req: RecallRequest, request: Request, bg: BackgroundTasks):
         raise HTTPException(422, "query 必填且非空")
     if req.bank is not None and req.bank not in config.BANKS:
         raise HTTPException(422, f"bank 必须为 {config.BANKS} 之一或 null（跨库）")
+    try:
+        recall_mod.validate_filters(req.filters)   # 坏参 400 带原因（P0 前：坏 date_range 裸 500）
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
     eng = request.app.state.engine
-    res = recall_mod.recall(eng.db, eng.embedder, req.query, req.bank, req.caller,
-                            max(1, min(req.top_k, 100)), req.filters)
+    try:
+        res = recall_mod.recall(eng.db, eng.embedder, req.query, req.bank, req.caller,
+                                max(1, min(req.top_k, 100)), req.filters)
+    except recall_mod.RecallRouteError as e:
+        # P0 错误语义批：任一路失败显式 503+degraded+retryable，禁吞成 200 静默空结果
+        raise HTTPException(503, detail={
+            "error": "recall 召回路失败（显式降级，非静默空结果）",
+            "degraded": True, "retryable": True, "failed_routes": e.failed_routes,
+        }) from None
     if res["results"]:
         hit_ids = [r["id"] for r in res["results"]]
         bg.add_task(_record_hits, eng, hit_ids, req.caller, req.query)

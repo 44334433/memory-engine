@@ -140,15 +140,16 @@ def semantic_dup(conn, bank: str, qvec: str, days: int, sim: float) -> tuple[str
 RETAIN_SQL = """
 INSERT INTO memories (
   id, bank, domain, trigger_term, title, body, body_ptr, tags, owner, visibility,
-  source_type, source_ref, priority, ttl_state, ttl_expires_at,
+  source_type, source_ref, priority, ttl_state, ttl_expires_at, source_tier, contains_pii,
   original_date, staleness, embed_model, embed_dim, embed_ver, content_hash, embedding)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,'candidate',
-        now() + (%s || ' days')::interval,
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,
+        now() + (%s || ' days')::interval,%s,%s,
         %s,%s,%s,%s,1,%s,%s::vector)
 RETURNING id, seq
 """
-# 阶段2：入场态 candidate（候选期 CANDIDATE_DAYS 天→trial，lifecycle 线程机械流转）；
-# 阶段1 曾直接 trial 入场。
+# 阶段2：user 来源入场态 candidate（候选期 CANDIDATE_DAYS 天→trial，lifecycle 线程机械流转）。
+# P0 投毒闸批（2026-09-16）：外部来源（agent/web/cron）默认 trial 低信任入场
+# （ttl_state/ttl_expires_days 由调用方按 poison_gate.entry_state 计算）；缺省 source_tier=agent。
 
 
 def insert_memory(conn, **f) -> dict:
@@ -159,7 +160,8 @@ def insert_memory(conn, **f) -> dict:
                 (
                     f["id"], f["bank"], f["domain"], f["trigger_term"], f["title"], f["body"],
                     f["body_ptr"], json.dumps(f["tags"]), f["owner"], f["visibility"],
-                    f["source_type"], f["source_ref"], f["priority"], f["candidate_days"],
+                    f["source_type"], f["source_ref"], f["priority"], f["ttl_state"],
+                    f["ttl_expires_days"], f["source_tier"], f["contains_pii"],
                     f["original_date"], f["staleness"], f["embed_model"], f["embed_dim"],
                     f["content_hash"], f["embedding"],
                 ),
@@ -168,7 +170,8 @@ def insert_memory(conn, **f) -> dict:
         execute(
             conn,
             "INSERT INTO changelog(op, memory_id, detail) VALUES ('retain', %s, %s::jsonb)",
-            (f["id"], json.dumps({"bank": f["bank"], "title": f["title"], "hash": f["content_hash"]})),
+            (f["id"], json.dumps({"bank": f["bank"], "title": f["title"], "hash": f["content_hash"],
+                                  "source_tier": f["source_tier"], "ttl_state": f["ttl_state"]})),
         )
     return row
 
@@ -220,7 +223,8 @@ def route_time(conn, bank, vis_sql, vis_params, limit: int, extra_sql: str, extr
 
 HYDRATE_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, owner, "
                 "visibility, source_type, source_ref, priority, ttl_state, staleness, "
-                "verify_status, created_at, updated_at, original_date, access_count, adopt_count")
+                "verify_status, created_at, updated_at, original_date, access_count, adopt_count, "
+                "source_tier, contains_pii")
 
 
 def hydrate(conn, ids: list) -> dict:

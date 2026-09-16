@@ -52,7 +52,8 @@ def retain_one(bank: str, content: str, context: str, source_ref: str) -> str:
     out = http("POST", "/v1/retain", {
         "bank": bank, "caller": "stage2-test",
         "items": [{"content": content, "context": context, "tags": ["stage2-selftest"],
-                   "source_type": "manual", "source_ref": source_ref, "priority": 3}]})
+                   "source_type": "manual", "source_ref": source_ref, "priority": 3,
+                   "source_tier": "user"}]})  # P0 投毒闸批：本测试验证 user 来源 candidate 候选期链路，显式声明
     assert out["ids"], f"retain failed: {out}"
     return out["ids"][0]
 

@@ -25,6 +25,7 @@ VIS = ("public", "agent", "private")
 LIST_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, owner, "
              "visibility, source_type, source_ref, priority, ttl_state, staleness, "
              "verify_status, created_at, updated_at, original_date, access_count, adopt_count, "
+             "source_tier, contains_pii, "
              "(embedding IS NOT NULL) AS has_embedding")
 
 

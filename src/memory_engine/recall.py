@@ -4,6 +4,7 @@ final = rrf × pri(0.9+0.05·priority) × life(ttl/verify) × stale(fresh/aging/
 """
 import logging
 import time
+from datetime import datetime
 
 from . import config, db
 from .db import PgPool
@@ -13,6 +14,50 @@ from .util import vec_to_pg
 log = logging.getLogger("memory-engine.recall")
 
 ROUTE_WEIGHTS = (("vector", config.W_VEC), ("fts", config.W_FTS), ("time", config.W_TIME))
+
+# —— P0 错误语义批（2026-09-16）：失败显式化，禁吞禁静默 ——
+
+class RecallRouteError(RuntimeError):
+    """任一召回路失败（三路 A/B/C 之一）。
+
+    P0 拍板：路失败必须显式上抛→API 层 503+degraded+retryable；原蓝图 §11
+    「单路静默降级为 200 空结果」语义即本批修复的错误语义，废弃。
+    """
+
+    def __init__(self, failed_routes: dict[str, str]):
+        self.failed_routes = failed_routes
+        super().__init__(f"recall routes failed: {sorted(failed_routes)}")
+
+
+_STALENESS_BUCKETS = ("fresh", "aging", "stale")
+
+
+def validate_filters(filters: dict | None) -> None:
+    """recall 参数校验：坏参 ValueError(带原因)，API 层映射 400（P0 前：坏 date_range 裸 500）。"""
+    f = filters or {}
+    if not isinstance(f, dict):
+        raise ValueError(f"filters 必须为对象，收到 {type(f).__name__}")
+    dr = f.get("date_range")
+    if dr is not None:
+        if not isinstance(dr, dict):
+            raise ValueError(f"filters.date_range 必须为对象（含 from/to），收到 {type(dr).__name__}")
+        for k in ("from", "to"):
+            v = dr.get(k)
+            if v is None:
+                continue
+            if not isinstance(v, str):
+                raise ValueError(f"filters.date_range.{k} 必须为 ISO8601 字符串，收到 {v!r}")
+            try:
+                datetime.fromisoformat(v.replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError(
+                    f"filters.date_range.{k} 非法时间格式: {v!r}（需 ISO8601，如 2026-09-01）") from None
+    st = f.get("staleness")
+    if st is not None:
+        vals = list(st) if isinstance(st, (list, tuple)) else [st]
+        bad = [v for v in vals if v not in _STALENESS_BUCKETS]
+        if bad:
+            raise ValueError(f"filters.staleness 仅允许 {_STALENESS_BUCKETS}，收到非法值 {bad}")
 
 
 def _vis_sql(caller: str | None) -> tuple[str, list]:
@@ -63,23 +108,33 @@ def recall(pool: PgPool, embedder: Embedder, query: str, bank: str | None, calle
     vis_sql, vis_params = _vis_sql(caller)
     extra_sql, extra_params = _filters_sql(filters)
     include_archived = bool((filters or {}).get("include_archived"))
-    degraded = False
+    failed_routes: dict[str, str] = {}
 
     with pool.connection() as conn:
         try:
             rows_a = db.route_vector(conn, bank, vis_sql, vis_params, qvec_pg,
                                      config.TOP_VEC, extra_sql, extra_params)
-        except Exception as e:  # 单路故障不拖垮整体（降级语义，蓝图 §11）
+        except Exception as e:  # P0 错误语义批：记录后统一上抛，禁静默空结果
             log.warning("route A(vector) failed: %s", e)
-            rows_a, degraded = [], True
+            rows_a = []
+            failed_routes["vector"] = str(e)[:300]
         try:
             rows_b = db.route_fts(conn, bank, vis_sql, vis_params, query,
                                   config.TOP_FTS, extra_sql, extra_params)
         except Exception as e:
             log.warning("route B(fts) failed: %s", e)
-            rows_b, degraded = [], True
-        rows_c = db.route_time(conn, bank, vis_sql, vis_params,
-                               config.TOP_TIME, extra_sql, extra_params)
+            rows_b = []
+            failed_routes["fts"] = str(e)[:300]
+        try:
+            rows_c = db.route_time(conn, bank, vis_sql, vis_params,
+                                   config.TOP_TIME, extra_sql, extra_params)
+        except Exception as e:
+            log.warning("route C(time) failed: %s", e)
+            rows_c = []
+            failed_routes["time"] = str(e)[:300]
+    if failed_routes:
+        raise RecallRouteError(failed_routes)   # 任一路失败→API 503+degraded+retryable
+    degraded = bool(failed_routes)              # 走到这里必为 False（200 响应形状兼容保留）
 
     fused: dict = {}
     for name, weight, rows in (("vector", config.W_VEC, rows_a),
@@ -119,6 +174,7 @@ def recall(pool: PgPool, embedder: Embedder, query: str, bank: str | None, calle
             "ttl_state": m["ttl_state"], "staleness": m["staleness"],
             "priority": m["priority"], "verify_status": m["verify_status"],
             "trigger_term": m["trigger_term"], "source_ref": m["source_ref"],
+            "source_tier": m["source_tier"], "contains_pii": m["contains_pii"],
             "created_at": m["created_at"].isoformat() if m["created_at"] else None,
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })

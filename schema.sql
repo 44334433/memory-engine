@@ -91,3 +91,9 @@ INSERT INTO engine_meta(key, value) VALUES
   ('embed_ver', '1'::jsonb),
   ('mode', '"normal"'::jsonb)
 ON CONFLICT (key) DO NOTHING;
+
+-- —— 投毒闸（2026-09-16 P0 批：错误语义+投毒闸）——
+-- source_tier 四级来源 user/agent/web/cron，缺省=agent（存量行按不信任缺省回填）；
+-- contains_pii 预留字段（本批只入库不判级，判级逻辑待 PII 闸拍板）。
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_tier text NOT NULL DEFAULT 'agent';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS contains_pii boolean;

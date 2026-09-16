@@ -87,4 +87,12 @@ WAL_ARCHIVE_DIR = os.environ.get(
 WAL_KEEP_FILES = int(os.environ.get("MEMORY_ENGINE_WAL_KEEP_FILES", "168"))  # ≈7天×24段/天(archive_timeout=3600)
 PG_BIN = "/usr/lib/postgresql/18/bin"
 
+# —— 投毒闸（2026-09-16 P0 拍板：错误语义+投毒闸批）——
+SOURCE_TIERS = ("user", "agent", "web", "cron")   # 四级来源；缺省=agent（缺元数据按不信任处理）
+EXTERNAL_SOURCE_TIERS = ("agent", "web", "cron")  # 外部来源（非用户直输）：默认 trial 低信任入场
+EXTERNAL_ENTRY_STATE = "trial"
+# 注入扫描范围：all=全量起步（当前拍板）| external_only=收紧态。废弃条件（写死）：
+# 误报率实测 >30% 时切 external_only（仅扫非 user 来源），样本库本体不动。
+INJECTION_SCAN_SCOPE = os.environ.get("MEMORY_ENGINE_INJECTION_SCAN", "all")
+
 VERSION = "0.2.0-phase2"
