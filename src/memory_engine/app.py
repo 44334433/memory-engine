@@ -16,6 +16,8 @@ from . import consolidate as consol, lifecycle as lc
 from .api_core import router as core_router
 from .api_lifecycle import router as lifecycle_router
 from .api_memories import router as mem_router
+from .api_attachments import router as attachments_router   # P0 附件批（挂法见 api_attachments.py L18-19）
+from .api_graph import router as graph_router               # P0 附件批：图谱只读可视化
 from .db import PgPool
 from .embedder import EmbeddingProvider, build_embedder
 
@@ -103,8 +105,11 @@ async def lifespan(app: FastAPI):
         _spawn_embedder_selfheal(eng)                # 保活：降级态周期重试拉回全功能（2026-09-16）
     _prewarm(eng.db)
     smoke = recall_mod.recall(eng.db, eng.embedder, "memory engine warmup 预热查询", None, "main", 3, {})
-    if smoke["took_ms"] >= 200:
-        raise RuntimeError(f"warmup recall {smoke['took_ms']}ms >= 200ms（蓝图 §8.2-3 启动失败）")
+    warmup_budget_ms = int(os.environ.get("MEMORY_ENGINE_WARMUP_BUDGET_MS", "200"))
+    if smoke["took_ms"] >= warmup_budget_ms:
+        raise RuntimeError(
+            f"warmup recall {smoke['took_ms']}ms >= {warmup_budget_ms}ms（蓝图 §8.2-3 启动失败；"
+            "CPU 部署/CI 用 MEMORY_ENGINE_WARMUP_BUDGET_MS 放宽）")
     if smoke.get("degraded"):
         log.warning("startup smoke recall degraded=%s failed_routes=%s（fts-only 降级态启动）",
                     smoke["degraded"], smoke.get("failed_routes"))
@@ -160,4 +165,6 @@ def create_app() -> FastAPI:
     app.include_router(core_router)
     app.include_router(mem_router)
     app.include_router(lifecycle_router)
+    app.include_router(graph_router)
+    app.include_router(attachments_router)
     return app
