@@ -1,6 +1,9 @@
 """三路召回 + RRF 融合 + score 分解（蓝图 §4）。
 路A pgvector KNN（w=1.0） / 路B PGroonga BM25（w=0.8） / 路C 时序-重要性（w=0.4）
-final = rrf × pri(0.9+0.05·priority) × life(ttl/verify) × stale(fresh/aging/stale 拍板降权)
+final = rrf × pri(0.9+0.05·priority) × life(ttl/verify) × stale(fresh/aging/stale)
+        × tier(source_tier 降权 P1：web=0.85/cron=0.9 可配)
+P1 降级语义（2026-09-16 拍板）：嵌入路失败→降级纯 FTS+时序路（200+degraded+failed_routes）；
+503 只留给全路失败（P0「禁吞禁静默」不变，显式降级取代单路失败即 503）。
 """
 import logging
 import time
@@ -8,7 +11,7 @@ from datetime import datetime
 
 from . import config, db
 from .db import PgPool
-from .embedder import Embedder
+from .embedder import EmbeddingProvider
 from .util import vec_to_pg
 
 log = logging.getLogger("memory-engine.recall")
@@ -18,10 +21,12 @@ ROUTE_WEIGHTS = (("vector", config.W_VEC), ("fts", config.W_FTS), ("time", confi
 # —— P0 错误语义批（2026-09-16）：失败显式化，禁吞禁静默 ——
 
 class RecallRouteError(RuntimeError):
-    """任一召回路失败（三路 A/B/C 之一）。
+    """全路失败（P1 演进：503 只留给全路失败）。
 
     P0 拍板：路失败必须显式上抛→API 层 503+degraded+retryable；原蓝图 §11
-    「单路静默降级为 200 空结果」语义即本批修复的错误语义，废弃。
+    「单路静默降级为 200 空结果」语义即 P0 修复的错误语义，废弃。
+    P1 拍板（2026-09-16）：部分路失败不再 503——改为 200+degraded+failed_routes
+    显式降级（宁降级不 503，禁吞不变）；仅当全部尝试路皆失败时上抛本异常→503。
     """
 
     def __init__(self, failed_routes: dict[str, str]):
@@ -101,40 +106,48 @@ def _life_factor(ttl_state: str, verify_status: str, include_archived: bool) -> 
     return base * config.VERIFY_FACTOR.get(verify_status, 1.0)
 
 
-def recall(pool: PgPool, embedder: Embedder, query: str, bank: str | None, caller: str | None,
+def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | None, caller: str | None,
            top_k: int, filters: dict | None) -> dict:
     t0 = time.perf_counter()
-    qvec_pg = vec_to_pg(embedder.embed_queries([query])[0])
+    # —— P1 降级批：嵌入路失败→登记后跳过矢量路，降级纯 FTS+时序路（宁降级不 503/不炸调用）——
+    failed_routes: dict[str, str] = {}
+    qvec_pg: str | None = None
+    try:
+        qvec_pg = vec_to_pg(embedder.embed_queries([query])[0])
+    except Exception as e:  # noqa: BLE001 —— 嵌入故障显式登记（failed_routes.vector），禁静默
+        log.warning("embed failed → fts-only degrade: %s", e)
+        failed_routes["vector"] = f"embed: {str(e)[:300]}"
     vis_sql, vis_params = _vis_sql(caller)
     extra_sql, extra_params = _filters_sql(filters)
     include_archived = bool((filters or {}).get("include_archived"))
-    failed_routes: dict[str, str] = {}
+    attempted = ("vector", "fts", "time") if qvec_pg is not None else ("fts", "time")
+    rows_a: list = []
+    rows_b: list = []
+    rows_c: list = []
 
     with pool.connection() as conn:
-        try:
-            rows_a = db.route_vector(conn, bank, vis_sql, vis_params, qvec_pg,
-                                     config.TOP_VEC, extra_sql, extra_params)
-        except Exception as e:  # P0 错误语义批：记录后统一上抛，禁静默空结果
-            log.warning("route A(vector) failed: %s", e)
-            rows_a = []
-            failed_routes["vector"] = str(e)[:300]
+        if qvec_pg is not None:
+            try:
+                rows_a = db.route_vector(conn, bank, vis_sql, vis_params, qvec_pg,
+                                         config.TOP_VEC, extra_sql, extra_params)
+            except Exception as e:  # P0/P1：记录后不立即上抛，统一走「全路失败才 503」判定
+                log.warning("route A(vector) failed: %s", e)
+                failed_routes["vector"] = str(e)[:300]
         try:
             rows_b = db.route_fts(conn, bank, vis_sql, vis_params, query,
                                   config.TOP_FTS, extra_sql, extra_params)
         except Exception as e:
             log.warning("route B(fts) failed: %s", e)
-            rows_b = []
             failed_routes["fts"] = str(e)[:300]
         try:
             rows_c = db.route_time(conn, bank, vis_sql, vis_params,
                                    config.TOP_TIME, extra_sql, extra_params)
         except Exception as e:
             log.warning("route C(time) failed: %s", e)
-            rows_c = []
             failed_routes["time"] = str(e)[:300]
-    if failed_routes:
-        raise RecallRouteError(failed_routes)   # 任一路失败→API 503+degraded+retryable
-    degraded = bool(failed_routes)              # 走到这里必为 False（200 响应形状兼容保留）
+    if set(failed_routes) >= set(attempted):
+        raise RecallRouteError(failed_routes)   # 全路失败→API 503+degraded+retryable（P1 唯一 503 入口）
+    degraded = bool(failed_routes)              # 部分路失败=显式降级 200（degraded+failed_routes 透出）
 
     fused: dict = {}
     for name, weight, rows in (("vector", config.W_VEC, rows_a),
@@ -147,7 +160,8 @@ def recall(pool: PgPool, embedder: Embedder, query: str, bank: str | None, calle
 
     if not fused:
         return {"results": [], "took_ms": round((time.perf_counter() - t0) * 1000, 1),
-                "degraded": degraded, "routes": {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}}
+                "degraded": degraded, "failed_routes": failed_routes,
+                "routes": {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}}
 
     with pool.connection() as conn:
         meta = db.hydrate(conn, list(fused.keys()))
@@ -160,12 +174,14 @@ def recall(pool: PgPool, embedder: Embedder, query: str, bank: str | None, calle
         pri = 0.9 + 0.05 * m["priority"]
         life = _life_factor(m["ttl_state"], m["verify_status"], include_archived)
         stale = config.STALE_WEIGHTS.get(m["staleness"], 1.0)
-        final = entry["rrf"] * pri * life * stale
+        tier_w = config.TIER_WEIGHTS.get(m["source_tier"], 1.0)   # P1：web/cron 置信度降权（可配）
+        final = entry["rrf"] * pri * life * stale * tier_w
         scored.append({
             "id": str(mid), "score": round(final, 6),
             "score_parts": {
                 "rrf": round(entry["rrf"], 6), "pri": round(pri, 4),
                 "life": round(life, 4), "stale": stale,
+                "tier_weight": round(tier_w, 4),
                 "routes": entry["routes"],
             },
             "title": m["title"], "body": m["body"], "body_ptr": m["body_ptr"],
@@ -183,5 +199,6 @@ def recall(pool: PgPool, embedder: Embedder, query: str, bank: str | None, calle
         "results": scored[:top_k],
         "took_ms": round((time.perf_counter() - t0) * 1000, 1),
         "degraded": degraded,
+        "failed_routes": failed_routes,
         "routes": {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)},
     }

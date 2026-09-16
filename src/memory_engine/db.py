@@ -141,15 +141,17 @@ RETAIN_SQL = """
 INSERT INTO memories (
   id, bank, domain, trigger_term, title, body, body_ptr, tags, owner, visibility,
   source_type, source_ref, priority, ttl_state, ttl_expires_at, source_tier, contains_pii,
-  original_date, staleness, embed_model, embed_dim, embed_ver, content_hash, embedding)
+  original_date, staleness, embed_model, embed_dim, embed_ver, content_hash, embedding, dedup_key)
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,
         now() + (%s || ' days')::interval,%s,%s,
-        %s,%s,%s,%s,1,%s,%s::vector)
+        %s,%s,%s,%s,1,%s,%s::vector,%s)
 RETURNING id, seq
 """
 # 阶段2：user 来源入场态 candidate（候选期 CANDIDATE_DAYS 天→trial，lifecycle 线程机械流转）。
 # P0 投毒闸批（2026-09-16）：外部来源（agent/web/cron）默认 trial 低信任入场
 # （ttl_state/ttl_expires_days 由调用方按 poison_gate.entry_state 计算）；缺省 source_tier=agent。
+# P1 判重 UNIQUE 兜底批（2026-09-16）：dedup_key 追加在参数列末位（index 23），
+# 并发竞态下 DB 层 UNIQUE(bank, dedup_key) 兜底，冲突时应用层返回既有条目；存量回填见 scripts/migrations/。
 
 
 def insert_memory(conn, **f) -> dict:
@@ -164,6 +166,7 @@ def insert_memory(conn, **f) -> dict:
                     f["ttl_expires_days"], f["source_tier"], f["contains_pii"],
                     f["original_date"], f["staleness"], f["embed_model"], f["embed_dim"],
                     f["content_hash"], f["embedding"],
+                    f.get("dedup_key"),   # P1：判重 UNIQUE 兜底键（None=NULL，不参与部分唯一索引）
                 ),
             )
             row = dict(zip(["id", "seq"], cur.fetchone()))

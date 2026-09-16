@@ -97,3 +97,12 @@ ON CONFLICT (key) DO NOTHING;
 -- contains_pii 预留字段（本批只入库不判级，判级逻辑待 PII 闸拍板）。
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_tier text NOT NULL DEFAULT 'agent';
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS contains_pii boolean;
+
+-- —— 判重 UNIQUE 兜底（2026-09-16 P1 第一批）——
+-- dedup_key = sha256(body + US(0x1f) + context)（应用层 util.dedup_hash 同构）；
+-- 存量回填=sha256(body + US)（context 未落库；新写入必带非空 context，永不与回填键冲突）；
+-- 部分唯一索引排除 retired（软删后允许同内容重建）；并发竞态撞索引→应用层返回既有条目。
+-- 存量迁移走 scripts/migrations/001_dedup_key_unique.sql（幂等，可重复执行）。
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS dedup_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mem_dedup ON memories (bank, dedup_key)
+  WHERE dedup_key IS NOT NULL AND ttl_state <> 'retired';

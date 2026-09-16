@@ -136,12 +136,15 @@ def patch_memory(mid: uuid.UUID, req: PatchRequest, request: Request):
             sets.append("content_hash=%s"); params.append(content_hash(cur["bank"], new_body))
             sets.append("embed_model=%s"); params.append(config.EMBED_MODEL)
             sets.append("embed_dim=%s"); params.append(config.EMBED_DIM)
-            vec = eng.embedder.embed_documents([new_body])[0]   # 改文即重嵌
+            sets.append("embed_ver=%s"); params.append(config.EMBED_VER)   # P1：改文重嵌=当前批次版本
+            vec = eng.embedder.embed_documents([new_body])[0]   # 改文即重嵌（GPU 在事务外：持池连接不做嵌入）
             sets.append("embedding=%s::vector"); params.append(vec_to_pg(vec))
         sets.append("updated_at=now()")
         params.append(mid)
-        row = db.fetch_one(conn, f"UPDATE memories SET {', '.join(sets)} WHERE id=%s RETURNING {LIST_COLS}", tuple(params))
-        db.log_changelog(conn, "update", mid, {"patched": [s.split("=")[0] for s in sets]})
+        # P1 原子化批：memories UPDATE + changelog INSERT 包同一事务（原：非原子，改文成功+账本缺账可能）
+        with conn.transaction():
+            row = db.fetch_one(conn, f"UPDATE memories SET {', '.join(sets)} WHERE id=%s RETURNING {LIST_COLS}", tuple(params))
+            db.log_changelog(conn, "update", mid, {"patched": [s.split("=")[0] for s in sets]})
     if not row:
         raise HTTPException(404, f"memory {mid} 不存在")
     return _jsonable(row)
@@ -178,6 +181,8 @@ def adopt_memory(mid: uuid.UUID, request: Request, caller: str = "main"):
         db.execute(conn, "INSERT INTO access_events(memory_id, kind, caller) VALUES (%s,'adopted',%s)",
                    (mid, caller[:120]))
         db.execute(conn, "UPDATE memories SET adopt_count=adopt_count+1, last_accessed_at=now() WHERE id=%s", (mid,))
+        # P1 原子化批：adopt 记账进 changelog（账本真源）与 UPDATE 同事务，杜绝「计数变+账本缺账」
+        db.log_changelog(conn, "adopt", mid, {"caller": caller[:120]})
         cnt = db.fetch_one(conn, "SELECT adopt_count FROM memories WHERE id=%s", (mid,)) or {"adopt_count": 0}
     return {"id": str(mid), "adopt_count": cnt["adopt_count"]}
 
@@ -194,9 +199,11 @@ def reembed_memory(mid: uuid.UUID, request: Request):
         with conn.transaction():
             db.execute(conn,
                        "UPDATE memories SET embedding=%s::vector, embed_model=%s, embed_dim=%s, "
-                       "updated_at=now() WHERE id=%s",
-                       (vec_to_pg(vec), config.EMBED_MODEL, config.EMBED_DIM, mid))
-            db.log_changelog(conn, "reembed", mid, {"dim": config.EMBED_DIM, "model": config.EMBED_MODEL})
+                       "embed_ver=%s, updated_at=now() WHERE id=%s",
+                       (vec_to_pg(vec), config.EMBED_MODEL, config.EMBED_DIM, config.EMBED_VER, mid))
+            db.log_changelog(conn, "reembed", mid,
+                             {"dim": config.EMBED_DIM, "model": config.EMBED_MODEL,
+                              "embed_ver": config.EMBED_VER})
     return {"id": str(mid), "reembedded": True, "dim": config.EMBED_DIM}
 
 

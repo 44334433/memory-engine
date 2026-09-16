@@ -4,11 +4,12 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import psycopg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from . import config, db, poison_gate, recall as recall_mod
-from .util import content_hash, derive_title, staleness_of, uuid7, vec_to_pg
+from .util import content_hash, dedup_hash, derive_title, staleness_of, uuid7, vec_to_pg
 
 log = logging.getLogger("memory-engine.api")
 router = APIRouter(prefix="/v1")
@@ -106,7 +107,7 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
             "scan_scope": config.INJECTION_SCAN_SCOPE, "items": flagged,
         })
     vectors = eng.embedder.embed_documents([it.content for it in req.items])
-    ids, skipped, maxseq = [], 0, 0
+    ids, skipped, maxseq, dedup_existing = [], 0, 0, []
     with pool_conn(eng) as conn:
         for it, vec in zip(req.items, vectors):
             ch = content_hash(req.bank, it.content)
@@ -123,21 +124,37 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
             # —— 投毒闸②：外部来源（agent/web/cron）默认 trial 低信任入场（user 走 candidate）——
             entry_state = poison_gate.entry_state(it.source_tier)
             expires_days = config.TRIAL_DECAY_DAYS if entry_state == "trial" else config.CANDIDATE_DAYS
-            row = db.insert_memory(
-                conn,
-                id=uuid7(), bank=req.bank, domain=it.domain, trigger_term=it.trigger_term,
-                title=it.title or derive_title(it.content), body=it.content,
-                body_ptr=it.body_ptr, tags=list(it.tags), owner=it.owner or req.caller,
-                visibility=it.visibility, source_type=it.source_type, source_ref=it.source_ref,
-                priority=it.priority, original_date=od, staleness=staleness_of(od),
-                embed_model=config.EMBED_MODEL, embed_dim=config.EMBED_DIM,
-                content_hash=ch, embedding=vec_to_pg(vec),
-                ttl_state=entry_state, ttl_expires_days=expires_days,
-                source_tier=it.source_tier, contains_pii=it.contains_pii,
-            )
+            dk = dedup_hash(it.content, it.context)   # P1：UNIQUE 兜底键 sha256(body+US+context)
+            try:
+                row = db.insert_memory(
+                    conn,
+                    id=uuid7(), bank=req.bank, domain=it.domain, trigger_term=it.trigger_term,
+                    title=it.title or derive_title(it.content), body=it.content,
+                    body_ptr=it.body_ptr, tags=list(it.tags), owner=it.owner or req.caller,
+                    visibility=it.visibility, source_type=it.source_type, source_ref=it.source_ref,
+                    priority=it.priority, original_date=od, staleness=staleness_of(od),
+                    embed_model=config.EMBED_MODEL, embed_dim=config.EMBED_DIM,
+                    content_hash=ch, embedding=vec_to_pg(vec), dedup_key=dk,
+                    ttl_state=entry_state, ttl_expires_days=expires_days,
+                    source_tier=it.source_tier, contains_pii=it.contains_pii,
+                )
+            except psycopg.errors.UniqueViolation:
+                # P1 判重 UNIQUE 兜底：并发竞态撞 UNIQUE(bank, dedup_key) → 返回既有条目（非 500 不重试炸）；
+                # 查不到对应行=非 dedup_key 冲突（防御），原样上抛不吞。
+                existing = db.fetch_one(
+                    conn,
+                    "SELECT id, seq FROM memories WHERE bank=%s AND dedup_key=%s "
+                    "AND ttl_state<>'retired' ORDER BY seq LIMIT 1",
+                    (req.bank, dk),
+                )
+                if not existing:
+                    raise
+                skipped += 1
+                dedup_existing.append(str(existing["id"]))
+                continue
             ids.append(str(row["id"]))
             maxseq = max(maxseq, row["seq"])
-    return {"ids": ids, "dedup_skipped": skipped, "seq": maxseq,
+    return {"ids": ids, "dedup_skipped": skipped, "dedup_existing": dedup_existing, "seq": maxseq,
             "took_ms": round((time.perf_counter() - t0) * 1000, 1)}
 
 
@@ -156,9 +173,9 @@ def recall(req: RecallRequest, request: Request, bg: BackgroundTasks):
         res = recall_mod.recall(eng.db, eng.embedder, req.query, req.bank, req.caller,
                                 max(1, min(req.top_k, 100)), req.filters)
     except recall_mod.RecallRouteError as e:
-        # P0 错误语义批：任一路失败显式 503+degraded+retryable，禁吞成 200 静默空结果
+        # P1 语义演进：503 只留给全路失败（部分路失败已在 recall 内降级为 200+degraded+failed_routes）
         raise HTTPException(503, detail={
-            "error": "recall 召回路失败（显式降级，非静默空结果）",
+            "error": "recall 全路失败（P0 显式语义：禁吞成静默空结果）",
             "degraded": True, "retryable": True, "failed_routes": e.failed_routes,
         }) from None
     if res["results"]:
@@ -198,7 +215,8 @@ def health(request: Request):
         "db": db_ok, "model_loaded": eng.model_loaded, "warm": eng.warm,
         "ready": eng.ready, "uptime_s": round(uptime, 1),
         "port": config.PORT, "pg": pg_info,
-        "embed": {"model": config.EMBED_MODEL, "dim": config.EMBED_DIM, "device": eng.embedder.device if eng.embedder else None},
+        "embed": {"provider": config.EMBED_PROVIDER, "model": config.EMBED_MODEL,
+                  "dim": config.EMBED_DIM, "device": eng.embedder.device if eng.embedder else None},
     }
 
 

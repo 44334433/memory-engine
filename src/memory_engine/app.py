@@ -17,7 +17,7 @@ from .api_core import router as core_router
 from .api_lifecycle import router as lifecycle_router
 from .api_memories import router as mem_router
 from .db import PgPool
-from .embedder import Embedder
+from .embedder import EmbeddingProvider, build_embedder
 
 log = logging.getLogger("memory-engine")
 
@@ -32,7 +32,7 @@ PREWARM_OBJECTS = (
 class Engine:
     def __init__(self) -> None:
         self.db: PgPool | None = None
-        self.embedder: Embedder | None = None
+        self.embedder: EmbeddingProvider | None = None
         self.ready = False
         self.warm = False
         self.model_loaded = False
@@ -85,14 +85,27 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=_watchdog_loop, args=(stop,), daemon=True, name="sd-watchdog").start()
     t0 = time.perf_counter()
     eng.db = PgPool(config.PG_DSN, config.POOL_MIN, config.POOL_MAX)
-    eng.embedder = Embedder()
-    eng.embedder.load()                              # fp16 → CUDA 常驻（~2-5s）
-    eng.model_loaded = True
-    eng.embedder.warmup()                            # dummy ×2 消 kernel 编译
+    eng.embedder = build_embedder()                  # P1 可插拔：qwen3 | openai_compat
+    try:
+        eng.embedder.load()                          # fp16 → CUDA 常驻（~2-5s）
+        eng.model_loaded = True
+    except Exception as e:  # noqa: BLE001
+        # P1 降级批：嵌入加载失败不再炸启动——daemon 以降级态服务（recall 自动 fts-only），
+        # health 四真以 model_loaded=false 暴露（宁降级服务，不整 daemon 不可用）。
+        eng.model_loaded = False
+        log.error("embedder load FAILED → degraded start (recall=fts-only): %s", e)
+    if eng.model_loaded:
+        try:
+            eng.embedder.warmup()                    # dummy ×2 消 kernel 编译
+        except Exception as e:  # noqa: BLE001 —— 预热失败不炸启动，调用期按路降级
+            log.warning("embedder warmup failed (per-call degrade): %s", e)
     _prewarm(eng.db)
     smoke = recall_mod.recall(eng.db, eng.embedder, "memory engine warmup 预热查询", None, "main", 3, {})
     if smoke["took_ms"] >= 200:
         raise RuntimeError(f"warmup recall {smoke['took_ms']}ms >= 200ms（蓝图 §8.2-3 启动失败）")
+    if smoke.get("degraded"):
+        log.warning("startup smoke recall degraded=%s failed_routes=%s（fts-only 降级态启动）",
+                    smoke["degraded"], smoke.get("failed_routes"))
     eng.warm = True
     eng.ready = True
     eng.lifecycle_last = None

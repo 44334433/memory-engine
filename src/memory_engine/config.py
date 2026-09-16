@@ -93,6 +93,24 @@ EXTERNAL_SOURCE_TIERS = ("agent", "web", "cron")  # 外部来源（非用户直�
 EXTERNAL_ENTRY_STATE = "trial"
 # 注入扫描范围：all=全量起步（当前拍板）| external_only=收紧态。废弃条件（写死）：
 # 误报率实测 >30% 时切 external_only（仅扫非 user 来源），样本库本体不动。
-INJECTION_SCAN_SCOPE = os.environ.get("MEMORY_ENGINE_INJECTION_SCAN", "all")
+INJECTION_SCAN_SCOPE = os.environ.get("MEMORY_ENGINE_INJECTION_SCAN", "external_only")
+
+# —— P1 第一批（2026-09-16）：嵌入可插拔 + fts-only 降级 + source_tier 降权 ——
+# 嵌入 Provider：qwen3=本地 Qwen3-0.6B fp16 CUDA（默认）| openai_compat=OpenAI 兼容远程端点
+EMBED_PROVIDER = os.environ.get("MEMORY_ENGINE_EMBED_PROVIDER", "qwen3")
+# openai_compat 远程端点（走 LLM_GATEWAY_API_KEY 鉴权；未配 key 时启动可过、调用期失败→recall 降级 fts-only）
+LLM_GATEWAY_BASE_URL = os.environ.get("LLM_GATEWAY_BASE_URL", "http://127.0.0.1:8080/v1")
+LLM_GATEWAY_API_KEY = os.environ.get("LLM_GATEWAY_API_KEY", "")
+EMBED_REMOTE_MODEL = os.environ.get("MEMORY_ENGINE_EMBED_REMOTE_MODEL", "qwen3-embedding-0.6b")
+EMBED_REMOTE_TIMEOUT = float(os.environ.get("MEMORY_ENGINE_EMBED_REMOTE_TIMEOUT", "10"))
+# 重嵌批次版本：换模时调大，scripts/reembed_backfill.py 批量重嵌 embed_ver<当前 的存量
+EMBED_VER = int(os.environ.get("MEMORY_ENGINE_EMBED_VER", "1"))
+# source_tier 召回降权（recall 融合阶段乘入 final；user/agent 不降权；web/cron 可配）
+TIER_WEIGHTS = {
+    "user": 1.0,
+    "agent": 1.0,
+    "web": float(os.environ.get("MEMORY_ENGINE_TIER_WEIGHT_WEB", "0.85")),
+    "cron": float(os.environ.get("MEMORY_ENGINE_TIER_WEIGHT_CRON", "0.9")),
+}
 
 VERSION = "0.2.0-phase2"
