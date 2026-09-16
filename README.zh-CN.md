@@ -110,7 +110,7 @@ pytest tests/ -v
 | 任意框架即插即用 | ❌ 宿主集成 | ✅ | ✅ |
 | 运维重量 | daemon+1 数据库 | 服务 | 通常较轻 |
 
-诞生于自建 Agent 平台（[Hermes Agent](https://hermes-agent.nousresearch.com/docs) 生态）的记忆层；超大工具输出的「引用化+回查」思路参考 [NeverFull 压缩代理](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy)（设计研究——尚未接线）。
+为 [Hermes Agent](https://hermes-agent.nousresearch.com/docs)（Nous Research 开源的 agent 框架）构建的记忆层；超大工具输出的「引用化+回查」思路参考 [NeverFull 压缩代理](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy)（设计研究——尚未接线）。
 
 ## 运维工具
 

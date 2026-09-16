@@ -110,7 +110,7 @@ Writes are deduplicated (cosine ≥ 0.97 against the last 30 days, context requi
 | Drop-in for any framework | ❌ host-integrated | ✅ | ✅ |
 | Ops weight | daemon + 1 DB | service | usually light |
 
-Born as the memory layer of a self-built agent platform ([Hermes Agent](https://hermes-agent.nousresearch.com/docs) ecosystem); the reference-and-callback idea for oversized tool outputs takes after [NeverFull compression proxy](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy) (design study — not yet wired in).
+Built as a memory layer for [Hermes Agent](https://hermes-agent.nousresearch.com/docs), an open-source agent framework by Nous Research; the reference-and-callback idea for oversized tool outputs takes after [NeverFull compression proxy](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy) (design study — not yet wired in).
 
 ## Maintenance tooling
 
