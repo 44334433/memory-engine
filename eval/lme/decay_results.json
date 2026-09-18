@@ -7,10 +7,6 @@
     "gold_turns": 204,
     "topk": 50,
     "buckets": [
-      500,
-      1000,
-      2000,
-      4000,
       6000
     ],
     "mode": "global (bank-wide top-k, no tag filter)",
@@ -157,6 +153,41 @@
         "ndcg_any@30": 0.8687
       },
       "elapsed_s": 3559.6
+    },
+    {
+      "bucket_size": 6000,
+      "corpus_actual": 6000,
+      "ingested": 5940,
+      "rag5_turn": 0.88,
+      "turn": {
+        "recall_any@1": 0.88,
+        "recall_any@5": 0.88,
+        "recall_any@10": 0.88,
+        "recall_any@30": 0.88,
+        "recall_all@1": 0.24,
+        "recall_all@5": 0.73,
+        "recall_all@10": 0.74,
+        "recall_all@30": 0.74,
+        "ndcg_any@1": 0.88,
+        "ndcg_any@5": 0.8359,
+        "ndcg_any@10": 0.8333,
+        "ndcg_any@30": 0.8333
+      },
+      "session": {
+        "recall_any@1": 0.88,
+        "recall_any@5": 0.88,
+        "recall_any@10": 0.88,
+        "recall_any@30": 0.88,
+        "recall_all@1": 0.27,
+        "recall_all@5": 0.76,
+        "recall_all@10": 0.77,
+        "recall_all@30": 0.77,
+        "ndcg_any@1": 0.88,
+        "ndcg_any@5": 0.8342,
+        "ndcg_any@10": 0.8333,
+        "ndcg_any@30": 0.8333
+      },
+      "elapsed_s": 5995.4
     }
   ]
 }

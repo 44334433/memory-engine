@@ -170,6 +170,18 @@ The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6
 
 **Full-corpus honesty note**: when the haystack is expanded to the entire ~6k-entry production corpus (real heterogeneous memories instead of the benchmark's designed distractors — the hardest configuration), R@5 drops to 0.122. We report both numbers because benchmark-only scores overstate real-world recall; the production deployment mitigates this with time-windowed filtering and the freshness protocol.
 
+**Scale decay curve (synthetic haystack, 2026-09-18)**: does the 0.122 come from corpus size? No — same 100-question set, same official scorer, only the synthetic haystack grows (nested distractors, no production memories):
+
+| Haystack turns | R@5 | R@1 |
+|---|---|---|
+| 500 | 0.97 | 0.97 |
+| 1,000 | 0.96 | 0.96 |
+| 2,000 | 0.94 | 0.94 |
+| 4,000 | 0.91 | 0.91 |
+| 6,000 | 0.88 | 0.88 |
+
+Every doubling costs 2–3pp — a smooth asymptote, no cliff at 6k. The gap between 0.88 (synthetic distractors at 6k) and 0.122 (real corpus at 6k) is therefore mostly heterogeneity, not scale: real memories compete with each other, designed distractors do not. Reproduce with `eval/lme/decay_curve.py` (results merge across restarts; one config per bucket via `DECAY_BUCKETS`).
+
 ## Honest limitations
 
 - **Single-host scale.** Designed for one agent system and one operator (tested to ~6k memories). No sharding story. If you need multi-tenant, this is the wrong tool *today*.
