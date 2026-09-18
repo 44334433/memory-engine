@@ -109,6 +109,12 @@ def ingest(items: list[dict]) -> int:
                 break
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 if attempt == 2:
+                    # 4xx 必读 body（2026-09-18 教训：bank 白名单/投毒闸等校验错误全藏在 body 里）
+                    try:
+                        print(f"  ingest FINAL {type(e).__name__} body: "
+                              f"{e.read().decode()[:400]}", flush=True)
+                    except Exception:
+                        pass
                     raise
                 print(f"  ingest retry {attempt + 1} after error: {e}", flush=True)
                 time.sleep(5)
@@ -196,7 +202,7 @@ def main() -> int:
                   # operator 提供的受控科研语料=user 级可信来源（投毒闸 external_only 模式
                   # 只拦非 user 源；语料中确实存在注入类英文句，正是闸门按设计拦截的实证，
                   # 评测数据不应被生产防线误伤，也不应为此凿穿防线——2026-09-18）
-                  "source_type": "user",
+                  "source_type": "manual", "source_tier": "user",
                   "tags": ["lme-decay", f"q:{c['qid']}", "decay"],
                   "domain": "general", "priority": 3,
                   "source_ref": c["source_ref"],
