@@ -101,6 +101,24 @@ Beyond vectors and full-text, the schema carries an entity-relation layer (`enti
 
 ## Quick Start
 
+Single-host daemon (see `scripts/`), or from a client with the Python SDK:
+
+```python
+from memoryengine import MemoryEngine
+
+mem = MemoryEngine("http://127.0.0.1:8766")          # one line: point at the daemon
+mem.retain("用户偏好橙白主题", context="UI 设计基线", source_tier="user")
+hits = mem.recall("界面配色用什么", top_k=5)           # typed results with score_parts
+```
+
+The SDK (`sdk/python/`, MIT, httpx-based) covers the full `/v1` surface — retain / recall / freshness digest / memories CRUD / adopt / attachments / graph / export — with exception mapping (`InvalidInput` on 400/422, `NotFound` on 404, `Conflict` on 409, `EngineOverloaded` on 503 with the `retryable` flag) and degraded responses passed through as data rather than raised as errors. 25 unit tests run against mocked transport; nothing about the daemon's lifecycle is required to use it.
+
+```bash
+pip install -e sdk/python    # from a checkout; py.typed included for editors
+```
+
+Single-host daemon notes:
+
 ```bash
 git clone https://github.com/<you>/memory-engine.git && cd memory-engine
 
