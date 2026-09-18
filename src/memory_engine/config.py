@@ -159,4 +159,49 @@ AUTOTUNE_MIN_DELTA = float(os.environ.get("MEMORY_ENGINE_AUTOTUNE_MIN_DELTA", "0
 AUTOTUNE_ALPHA = float(os.environ.get("MEMORY_ENGINE_AUTOTUNE_ALPHA", "0.05"))          # McNemar 显著性
 AUTOTUNE_ROUNDS = int(os.environ.get("MEMORY_ENGINE_AUTOTUNE_ROUNDS", "2"))             # 连续两轮
 
+# —— W2（2026-09-18）：memory_type 分层（semantic/procedural/episodic）——
+MEMORY_TYPES = ("semantic", "procedural", "episodic")
+MEMORY_TYPE_DEFAULT = "episodic"   # 存量缺省 + 未知值回退；retain 缺省走 memory_type.classify 启发式
+# 衰减窗口系数（lifecycle 各衰减规则的天数 × 系数；#23：整数天，最小改动不引入浮点比较）：
+# semantic 最慢 ×2.0、procedural ×1.5、episodic ×1.0=基准。
+# 兼容不变量（写死）：episodic 系数恒 1.0——三类之外的存量行为与拍板值逐一相等，
+# 既有衰减测试（TRIAL 30d/ACTIVE 90d/ARCHIVE 180d/L2 90d）零回归。
+# 仅作用于衰减/归档/零访问轨；revive/promote（信号驱动升级）一律不分型。
+TYPE_DECAY_FACTORS: dict[str, float] = {
+    "semantic": float(os.environ.get("MEMORY_ENGINE_DECAY_FACTOR_SEMANTIC", "2.0")),
+    "procedural": float(os.environ.get("MEMORY_ENGINE_DECAY_FACTOR_PROCEDURAL", "1.5")),
+    "episodic": 1.0,   # 基准不可配（兼容不变量）
+}
+
+# —— 自进化专项 #1（2026-09-18 拍板 a）：outcome 反馈 API（POST /v1/feedback）——
+OUTCOME_TYPES = ("adopted", "corrected", "useless")   # 三值语义对齐 Mem0 feedback
+# EMA 平滑系数（Cognee 边权重同构 w+=α(a−w)；量级=调研背书默认）。
+# ★变更点：EMA α 唯一调整入口=本行（写死值——本批刻意不做 env 覆盖，防生产/评测参数分叉；
+#   调参须走 L1 评审通道同步更新 tests/test_outcome_feedback.py 的递推期望值）。
+OUTCOME_EMA_ALPHA = 0.1
+
+# —— W1 核心记忆块（core block，2026-09-18 拍板顺序 W2 之后）——
+# 常驻注入区：高价值记忆不经检索直入宿主每轮上下文。宿主拉取式（GET /v1/core-block，
+# 复用 freshness-protocol 注入通道模式：注入走宿主 user message 尾部，禁引擎侧强推
+# system prompt——前缀缓存铁律）。与 freshness digest 是两种机制：
+# digest=游标增量事件摘要快照，core block=条目级原文常驻（无游标、幂等读、每次全量重算）。
+CORE_BLOCK_BUDGET_CHARS = int(os.environ.get("MEMORY_ENGINE_CORE_BLOCK_BUDGET", "1500"))
+# 默认 1500 对齐 freshness-protocol 注入预算闸（MAX_INJECT_CHARS），两种注入同闸不同源。
+CORE_BLOCK_MAX_ITEMS = int(os.environ.get("MEMORY_ENGINE_CORE_BLOCK_MAX_ITEMS", "20"))
+# 每轨候选取数硬顶（单表+排序无嵌入计算，P95<50ms 验收线的规模保障）。
+# 自动精选轨阈值（2026-09-18 拍板值，env 可覆盖；论证与废弃条件如下）：
+CORE_AUTO_TYPES = tuple(os.environ.get("MEMORY_ENGINE_CORE_AUTO_TYPES", "semantic,procedural").split(","))
+# episodic 一次性情境不常驻（W2 分层语义：情景记忆靠检索按需召回，常驻=噪音税）。
+CORE_MIN_POLARITY = float(os.environ.get("MEMORY_ENGINE_CORE_MIN_POLARITY", "0.5"))
+# polarity 高=adopted：EMA α=0.1 下 1−0.9^n≥0.5 ⇔ n≥7 次连续采纳（≈14 天内高频强正反馈），
+# 常驻区宁缺勿滥；废弃条件=宿主流量起来后自动轨长期空块（>30 天零自动入选）→ 降 0.3（n≥4）。
+CORE_MIN_ADOPT = int(os.environ.get("MEMORY_ENGINE_CORE_MIN_ADOPT", "2"))
+# adopt_count≥2：绝对采纳次数下限（与准入闸 PROMOTE_MIN_HITS=3 同量级；防单次偶然采纳入常驻）。
+CORE_SCORE_CAP_ADOPT = 10.0   # adopt_count 归一封顶（10 次以后边际为零，防刷计数独大）
+CORE_SCORE_ACCESS_CAP = 50.0  # access_count log 归一分母（recall_hit 是弱信号，log 压平长尾）
+# 轨内排序权重（启发式序，非校准分——只决定预算内先后，绝对值无意义）：
+CORE_W_POLARITY = 0.5   # polarity 主权重（唯一含负反馈的信号，corrected 会拉低出块）
+CORE_W_ADOPT = 0.3      # 采纳（宿主引用，强信号）
+CORE_W_ACCESS = 0.2     # 访问频次（recall_hit，弱信号，log 归一）
+
 VERSION = "0.4.0-p1c"

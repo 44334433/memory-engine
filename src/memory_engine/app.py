@@ -19,6 +19,7 @@ from .api_memories import router as mem_router
 from .api_attachments import router as attachments_router   # P0 附件批（挂法见 api_attachments.py L18-19）
 from .api_graph import router as graph_router               # P0 附件批：图谱只读可视化
 from .api_feedback import router as feedback_router         # 自进化#1（2026-09-18）：POST /v1/feedback
+from .api_core_block import router as core_block_router     # W1（2026-09-18）：GET /v1/core-block
 from .db import PgPool
 from .embedder import EmbeddingProvider, build_embedder
 
@@ -169,4 +170,5 @@ def create_app() -> FastAPI:
     app.include_router(graph_router)
     app.include_router(attachments_router)
     app.include_router(feedback_router)   # 自进化#1：POST /v1/feedback（新路由零改动既有端点）
+    app.include_router(core_block_router)  # W1：GET /v1/core-block（新路由零改动既有端点）
     return app
