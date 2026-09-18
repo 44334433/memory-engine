@@ -70,6 +70,14 @@ def validate_filters(filters: dict | None) -> None:
         bad = [v for v in vals if v not in config.MEMORY_TYPES]
         if bad:
             raise ValueError(f"filters.memory_type 仅允许 {config.MEMORY_TYPES}，收到非法值 {bad}")
+    ao = f.get("as_of")   # as-of 快照查询（Graphiti 同构语义）：查该时刻有效的版本，非法值 400 带原因
+    if ao is not None:
+        if not isinstance(ao, str):
+            raise ValueError(f"filters.as_of 必须为 ISO8601 字符串，收到 {ao!r}")
+        try:
+            datetime.fromisoformat(ao.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"filters.as_of 非法时间格式: {ao!r}（需 ISO8601，如 2026-09-01T00:00:00）") from None
 
 
 def _vis_sql(caller: str | None) -> tuple[str, list]:
@@ -110,7 +118,14 @@ def _filters_sql(filters: dict | None) -> tuple[str, list]:
         if dr.get("to"):
             sql += " AND created_at <= %s"
             params.append(dr["to"])
-    sql += " AND is_current"              # P1 二批：双时序——已失效历史版本不召回
+    ao = f.get("as_of")
+    if ao:
+        # as-of 快照：该时刻有效的版本（valid_at<=t<invalid_at 或其后从未失效）——
+        # Graphiti「query what was true at any point in time」同构语义；NULL valid_at 视为 created_at 同瞬（DEFAULT now()）
+        sql += " AND COALESCE(valid_at, created_at) <= %s AND (invalid_at IS NULL OR invalid_at > %s)"
+        params += [ao, ao]
+    else:
+        sql += " AND is_current"              # P1 二批：双时序——已失效历史版本不召回（缺省行为零变化）
     if f.get("include_archived"):
         sql += " AND ttl_state <> 'retired'"       # archived 可回捞；retired（用户删除）永不召回
     else:
