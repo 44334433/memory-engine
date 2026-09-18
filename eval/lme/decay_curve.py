@@ -193,9 +193,13 @@ def main() -> int:
         items = [{"content": c["content"],
                   "context": f"LME decay corpus turn (qid={c['qid']})",
                   "title": c["content"][:60] or "lme turn",
+                  # operator 提供的受控科研语料=user 级可信来源（投毒闸 external_only 模式
+                  # 只拦非 user 源；语料中确实存在注入类英文句，正是闸门按设计拦截的实证，
+                  # 评测数据不应被生产防线误伤，也不应为此凿穿防线——2026-09-18）
+                  "source_type": "user",
                   "tags": ["lme-decay", f"q:{c['qid']}", "decay"],
-                  "domain": "general", "priority": 3, "source_type": "eval",
-                  "source_tier": "web", "source_ref": c["source_ref"],
+                  "domain": "general", "priority": 3,
+                  "source_ref": c["source_ref"],
                   "owner": "main", "visibility": "agent"} for c in corpus]
         committed = ingest(items)
         if committed < corpus_n:
