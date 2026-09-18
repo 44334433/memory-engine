@@ -10,11 +10,11 @@ Production-proven in a single-host deployment serving a multi-agent system aroun
 
 | Metric | Value | How measured |
 |---|---|---|
-| Recall P@5 | **0.583** vs 0.194 baseline (session-scoped FTS) | Internal eval, 36 production queries, three-way hybrid retrieval |
-| Recall latency | **P95 = 15.8 ms** end-to-end (embedding + SQL + rerank) | Production daemon, ~2.3k live memories; full regression 28/28 incl. eval-corpus load |
+| LongMemEval-S R@5 | **0.652** vs 0.528 official BM25 baseline | 500-question full set, official harness; per-question results committed (`eval/lme/`) |
+| Recall latency | **P95 ≈ 65–235 ms** end-to-end at 39k memories (typed filters narrow it fastest) | Production daemon; scale decay curve below |
 | Migration | 2,303 memories migrated, 3,681 session-stream entries retired | One-shot migration with freshness audit |
 
-*The baseline is a production FTS retrieval of the same corpus; the eval set is private (contains real production content) — the harness in [`eval/`](eval/) is published, the dataset is not.*
+*The baseline is a production FTS retrieval of the same corpus; the benchmark set is fully public (`eval/lme/`), the 36-query production baseline stays private (real content) — parameter changes must clear both.*
 
 ---
 
@@ -62,6 +62,9 @@ Single binary process, single database, no external services. The embedder is wa
 | **Write protection** | prompt-injection gate (external content scanned, `external_only` default) + exact-hash and semantic dedup (cos ≥ 0.97 vs last 30 days) + source-tier downweighting (web 0.85, cron 0.9) | poisoned input never becomes trusted memory |
 | **Visibility model** | caller-scoped: `main` / per-agent / subagent see disjoint views; `private` entries invisible to non-owners | zero cross-host leakage |
 | **Graceful degradation** | embedder failure → explicit fts-only mode (200 + `degraded` + `failed_routes`), self-heal thread retries every 60 s and pulls vector recall back | degraded ≠ dead, and it says so |
+| **Typed memory** | every entry classified `semantic` / `procedural` / `episodic` at write time (heuristic classifier, backfill script included); decay half-lives differ per type (semantic ×2 slowest, episodic ×1 unchanged); `filters.memory_type` narrows all three routes | 37k entries backfilled; filtered recall runs faster than unfiltered |
+| **Outcome feedback** | `POST /v1/feedback {memory_id, outcome: adopted/corrected/useless}` — per-item EMA polarity (α=0.1) feeds the decay shield; corrected/useless land in the hard-query pool | closes the learn-from-the-host loop, not just introspection |
+| **Core-memory block** | `GET /v1/core-block` — pinned entries plus auto-selected (high-polarity, repeatedly-adopted semantic/procedural) rendered under a hard char budget, read with zero side effects | host pulls it per turn; default off, no system-prompt writes |
 | **Lifecycle TTL** | six-state machine (trial → active → … → retired → deleted): adoption extends life, 90 days of zero access decays | unused memory stops costing quality |
 | **Disaster recovery** | PG snapshots + timer, plus full logical export (`GET /v1/export`) | RTO measured at 2.5 s |
 | **Multi-host ready** | `tenant_id` / `agent_id` columns already in schema; isolation enforcement lands when a second host actually connects | schema now, enforcement on trigger |
@@ -72,27 +75,36 @@ Single binary process, single database, no external services. The embedder is wa
 ## API surface
 
 ```
-POST /v1/retain            write (dedup + injection scan + tiering)     → ids, dedup_skipped
-POST /v1/recall            four-route hybrid search                     → results + score_parts + routes
-POST /v1/freshness/digest  what changed since my last cursor            → budgeted, domain-scoped
-GET  /v1/memories          list/filter (bank, domain, state, time)      → paginated
-GET  /v1/memories/{id}     single entry + full provenance
-PATCH /v1/memories/{id}    update fields (re-embeds when body changes)
-POST /v1/adopt             report host adoption (feeds use-it-or-lose-it)
-DELETE /v1/memories/{id}   retire (soft), `?purge=true` for hard delete
-GET  /v1/export            full JSONL export (logical backup)
-GET  /v1/health            four-truth check: db + model + warm + ready
+POST /v1/retain                 write (dedup + injection scan + tiering)     → ids, dedup_skipped
+POST /v1/recall                 four-route hybrid search                     → results + score_parts + routes
+                                 filters: memory_type / as_of / date_range /
+                                 staleness / tags / tenant_id / agent_id
+POST /v1/freshness/digest       what changed since my last cursor            → budgeted, domain-scoped
+GET  /v1/core-block             always-on entries under a hard char budget   → text + ids (default off)
+POST /v1/feedback               host outcome signal: adopted / corrected /
+                                useless (EMA polarity, feeds decay + pool)   → polarity
+GET  /v1/memories               list/filter (bank, domain, state, time, as_of, type) → paginated
+GET  /v1/memories/{id}          single entry + full provenance
+PATCH /v1/memories/{id}         update fields (re-embeds when body changes);
+                                body+supersede=true starts a new version, pinned=true pins it
+POST /v1/memories/{id}/adopt    report host adoption (feeds use-it-or-lose-it)
+POST /v1/memories/{id}/attachments    image attachments (content-addressed, optional VLM caption)
+DELETE /v1/memories/{id}        retire (soft), `?purge=true` for hard delete
+GET  /v1/graph                  read-only entity/edge graph
+GET  /v1/export                 full JSONL export (logical backup)
+GET  /v1/health                 four-truth check: db + model + warm + ready
 ```
 
 ## Self-evolution
 
-The engine tunes itself from its own traffic — four loops, all running today:
+The engine tunes itself from its own traffic — five loops, all running today:
 
 > **Scope note, because reviewers read this differently than intended:** everything below optimizes *retrieval and memory behavior inside the engine*. Deliberately out of scope: learning that rewrites the host agent's prompts, policies, or actions — that loop belongs to the agent layer (e.g. lesson capture → constitution update in an agent framework). A memory backend that "improves agent behavior" by itself is an overreach signal, not a feature.
 
 - **Parameter self-tuning** (`scripts/param_autotune.py` + weekly systemd timer): mutates retrieval weights (RRF k / route weights), replays the eval question set per-question, and commits a new parameter snapshot only after two consecutive rounds beat the frozen baseline by ≥5%. Otherwise it rolls back and logs why. First scheduled run: dry-run.
 - **Use-it-or-lose-it** (lifecycle): the `access_events` table feeds the TTL state machine — memories that get recalled and *adopted* by the host get their lifespan extended; 90 days of zero access demotes them toward decay. Memory that is never used stops costing retrieval quality.
 - **Failure backflow** (`src/memory_engine/hard_queries.py`): every recall that returns nothing (or a below-threshold top score) lands in a hard-query pool. Periodic analysis turns the pool into concrete tuning proposals instead of letting failures evaporate.
+- **Outcome backflow** (`POST /v1/feedback`): the host reports what happened to a recalled memory — adopted, corrected, or useless. Each signal moves a per-item EMA polarity that shields against decay; corrections and useless votes also land in the hard-query pool. This is the loop that learns *from the host* rather than from the engine's own logs.
 - **Consolidation** (`scripts/consolidate_synthesize.py`): clusters of same-domain active memories synthesize into observation drafts via the batch LLM channel — drafts only, a human reviews before anything enters the store. No silent rewrites of your memory.
 
 Two honesty notes: the self-tuning gate uses paired per-question testing (not aggregate averages, which hide regressions), and none of these loops can delete or rewrite memories — consolidation stops at draft, deletion stays manual.
@@ -184,8 +196,8 @@ Every doubling costs 2–3pp — a smooth asymptote, no cliff at 6k. The gap bet
 
 ## Honest limitations
 
-- **Single-host scale.** Designed for one agent system and one operator (tested to ~6k memories). No sharding story. If you need multi-tenant, this is the wrong tool *today*.
-- **Internal eval only.** The 36-query eval set contains real production content and stays private. Numbers are reproducible in kind, not in dataset. The harness is published so you can build your own.
+- **Single-host scale.** Designed for one agent system and one operator (running at ~40k memories; tested to 122k in the no-filter worst case below). No sharding story. If you need multi-tenant, this is the wrong tool *today*.
+- **Eval split, on purpose.** Two tracks: the public LongMemEval set (500 questions, `eval/lme/`, fully reproducible) and a 36-query private baseline containing real production content — reproducible in kind, not in dataset. Dual-gate: parameter changes must clear both before they stick.
 - **CJK-first FTS.** PGroonga is load-bearing for Chinese recall; English-only deployments may prefer to swap in a different FTS extension.
 - **One embedder opinionated.** Qwen3-Embedding-0.6B fp16 on CUDA was chosen after measurement (see `docs/`); CPU-only hosts work but latency budgets change.
 - **uuid7 variant bits** are not fully RFC 9562-conformant yet (time-prefix semantics verified; tracked in issues).
