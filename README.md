@@ -168,7 +168,7 @@ Evaluated on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 500-qu
 
 The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6B) + PostgreSQL full-text (PGroonga) + temporal routing, fused with weighted RRF. **Full data & reproduction pipeline: [`eval/lme/`](eval/lme/README.md)** — per-question results, corpus, and scripts are committed.
 
-**Full-corpus honesty note**: when the haystack is expanded to the entire ~6k-entry production corpus (real heterogeneous memories instead of the benchmark's designed distractors — the hardest configuration), R@5 drops to 0.122. We report both numbers because benchmark-only scores overstate real-world recall; the production deployment mitigates this with time-windowed filtering and the freshness protocol.
+**Full-corpus honesty note**: with no filtering at all, retrieval over the full 122K-memory store (production memories merged with the entire benchmark corpus — maximal heterogeneity, the hardest configuration) scores R@5 0.122, against BM25's 0.179 under the identical condition. The scale decay curve below isolates the cause: heterogeneity, not size. Production deployments mitigate with time-windowed filtering, the freshness protocol, typed retrieval (`memory_type` filters), core-memory blocks for always-on entries, and — coming next — pluggable reranking.
 
 **Scale decay curve (synthetic haystack, 2026-09-18)**: does the 0.122 come from corpus size? No — same 100-question set, same official scorer, only the synthetic haystack grows (nested distractors, no production memories):
 
@@ -180,7 +180,7 @@ The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6
 | 4,000 | 0.91 | 0.91 |
 | 6,000 | 0.88 | 0.88 |
 
-Every doubling costs 2–3pp — a smooth asymptote, no cliff at 6k. The gap between 0.88 (synthetic distractors at 6k) and 0.122 (real corpus at 6k) is therefore mostly heterogeneity, not scale: real memories compete with each other, designed distractors do not. Reproduce with `eval/lme/decay_curve.py` (results merge across restarts; one config per bucket via `DECAY_BUCKETS`).
+Every doubling costs 2–3pp — a smooth asymptote, no cliff at 6k. The gap between 0.88 here (designed distractors, even at 6k turns) and 0.122 on the full heterogeneous store is therefore mostly heterogeneity, not scale: real memories compete with each other, designed distractors do not. Reproduce with `eval/lme/decay_curve.py` (results merge across restarts; one config per bucket via `DECAY_BUCKETS`).
 
 ## Honest limitations
 
