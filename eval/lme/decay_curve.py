@@ -180,7 +180,7 @@ def main() -> int:
     print(f"scored_set={len(qids)} gold_turns={gold_n}", flush=True)
 
     # distractor pool: other questions' user turns (synthetic corpus, safe)
-    pool_all = [d for d in turns if d["content"].strip() and q_turns_owner[d] not in set(qids)]  # 空 content 过滤：ShareGPT 个别 turn 为空（引擎校验正确拒 422）
+    pool_all = [d for d in turns if turns[d].strip() and q_turns_owner[d] not in set(qids)]  # 空 content 过滤（turns 为 doc_id→content dict）
     random.Random(SEED).shuffle(pool_all)
 
     n_purged = bank_purge()
