@@ -240,7 +240,8 @@ def route_time(conn, bank, vis_sql, vis_params, limit: int, extra_sql: str, extr
 HYDRATE_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, owner, "
                 "visibility, source_type, source_ref, priority, ttl_state, staleness, "
                 "verify_status, created_at, updated_at, original_date, access_count, adopt_count, "
-                "source_tier, contains_pii, memory_type")   # W2：memory_type 进召回结果
+                "source_tier, contains_pii, memory_type, "   # W2：memory_type 进召回结果
+                "outcome, polarity")                          # 自进化#1：outcome 反馈信号进 score_parts
 
 
 def hydrate(conn, ids: list) -> dict:

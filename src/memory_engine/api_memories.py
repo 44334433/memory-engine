@@ -28,6 +28,7 @@ LIST_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, 
              "source_tier, contains_pii, "
              "valid_at, invalid_at, is_current, tenant_id, agent_id, "   # P1 二批：双时序+多宿主
              "memory_type, "                                             # W2 分层
+             "outcome, polarity, outcome_at, "                           # 自进化#1：反馈信号可查
              "(embedding IS NOT NULL) AS has_embedding")
 
 

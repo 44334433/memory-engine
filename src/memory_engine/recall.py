@@ -258,6 +258,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
                 "life": round(life, 4), "stale": stale,
                 "tier_weight": round(tier_w, 4),
                 "graph": round(graph_rrf.get(mid, 0.0), 6),   # P1 二批：graph 分量透出（observe 期 W_GRAPH=0.5）
+                "outcome": m.get("outcome"), "polarity": m.get("polarity"),   # 自进化#1：反馈信号透出（NULL=无信号；本批不参与评分，仅观测）
                 "routes": entry["routes"],
             },
             "title": m["title"], "body": m["body"], "body_ptr": m["body_ptr"],
