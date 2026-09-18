@@ -2,6 +2,7 @@
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -29,6 +30,7 @@ LIST_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, 
              "valid_at, invalid_at, is_current, tenant_id, agent_id, "   # P1 二批：双时序+多宿主
              "memory_type, "                                             # W2 分层
              "outcome, polarity, outcome_at, "                           # 自进化#1：反馈信号可查
+             "pinned, "                                                  # W1：常驻注入钉住标记
              "(embedding IS NOT NULL) AS has_embedding")
 
 
@@ -49,6 +51,7 @@ class PatchRequest(BaseModel):
     tenant_id: Optional[str] = None      # P1 二批：多宿主留位
     agent_id: Optional[str] = None
     memory_type: Optional[str] = None    # W2 分层：类型可人工纠偏
+    pinned: Optional[bool] = None        # W1 核心记忆块：钉住/摘钉（bool 显式判 None，false 也生效）
     supersede: bool = False              # P1 二批：双时序矛盾更新（旧条失效+新条重存，id 会变）
     valid_at: Optional[str] = None       # supersede 事件时间（缺省=now()；时间截断两侧同值）
 
@@ -86,9 +89,17 @@ def list_memories(request: Request, bank: Optional[str] = None, state: Optional[
                   owner: Optional[str] = None, domain: Optional[str] = None,
                   tenant_id: Optional[str] = None, agent_id: Optional[str] = None,
                   memory_type: Optional[str] = None,
+                  as_of: Optional[str] = None,
                   q: Optional[str] = None, limit: int = 20, offset: int = 0):
     eng = request.app.state.engine
     limit = max(1, min(limit, 200))
+    if as_of is not None:
+        if not isinstance(as_of, str):
+            raise HTTPException(status_code=400, detail="as_of 必须为 ISO8601 字符串")
+        try:
+            datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"as_of 非法时间格式: {as_of!r}（需 ISO8601）")
     where, params = ["TRUE"], []
     if bank:
         where.append("bank=%s"); params.append(bank)
@@ -104,6 +115,10 @@ def list_memories(request: Request, bank: Optional[str] = None, state: Optional[
         where.append("agent_id=%s"); params.append(agent_id)
     if memory_type:
         where.append("memory_type=%s"); params.append(memory_type)  # W2 分层：类型过滤
+    if as_of:
+        # as-of 快照：该时刻有效版本（含当时已生效、尚未失效的）；缺省不过滤=全量含历史（现状零变化）
+        where.append("COALESCE(valid_at, created_at) <= %s AND (invalid_at IS NULL OR invalid_at > %s)")
+        params += [as_of, as_of]
     if q:
         where.append("search_text &@~ %s"); params.append(q)
     wsql = " AND ".join(where)
@@ -160,6 +175,8 @@ def patch_memory(mid: uuid.UUID, req: PatchRequest, request: Request):
             sets.append("agent_id=%s"); params.append(req.agent_id)
         if req.memory_type is not None:
             sets.append("memory_type=%s"); params.append(req.memory_type)  # W2：人工纠偏通道
+        if req.pinned is not None:
+            sets.append("pinned=%s"); params.append(req.pinned)   # W1：pin/unpin（false 亦须生效→判 is not None）
         if req.ttl_state is not None:
             sets.append("ttl_state=%s"); params.append(req.ttl_state)
             if req.ttl_state == "retired":
@@ -230,6 +247,7 @@ def _patch_supersede(eng, conn, mid: uuid.UUID, cur: dict, req: "PatchRequest") 
         tenant_id=req.tenant_id if req.tenant_id is not None else full["tenant_id"],
         agent_id=req.agent_id if req.agent_id is not None else full["agent_id"],
         memory_type=req.memory_type if req.memory_type is not None else full["memory_type"],  # W2：谱系继承
+        pinned=req.pinned if req.pinned is not None else bool(full["pinned"]),  # W1：钉随谱系走（旧行 is_current=false 自动出块）
     )
     res = db.supersede_memory(conn, mid, fields)
     if res is None:

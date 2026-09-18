@@ -153,3 +153,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_edge_mem ON edges (src_mid, dst_mid, etype)
   WHERE dst_mid IS NOT NULL AND invalid_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_edge_ent ON edges (src_mid, entity_id, etype)
   WHERE entity_id IS NOT NULL AND invalid_at IS NULL;
+
+-- —— outcome 反馈信号（2026-09-18 自进化专项 #1 拍板 a；存量库迁移走 scripts/migrations/006）——
+-- 三列全可空（NULL=无信号），PG11+ 元数据级加列不重写存量行；评分公式本批不消费（仅
+-- recall score_parts 透出 + L2/L3 经 changelog/access_events/hard_queries 既有通道接线）。
+-- 选型论证（新列 vs 独立表）见 src/memory_engine/outcome.py 模块 docstring。
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS outcome text;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS polarity double precision;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS outcome_at timestamptz;
+ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_outcome_check;
+ALTER TABLE memories ADD CONSTRAINT memories_outcome_check
+  CHECK (outcome IN ('adopted', 'corrected', 'useless'));
+ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_polarity_range_check;
+ALTER TABLE memories ADD CONSTRAINT memories_polarity_range_check
+  CHECK (polarity BETWEEN -1 AND 1);
+
+-- —— W1 核心记忆块（core block，2026-09-18 拍板顺序 W2 之后；存量库迁移走 scripts/migrations/007）——
+-- pinned=人工钉住标记（常驻注入快速通道），NOT NULL DEFAULT false：PG11+ 元数据级加列，
+-- 存量行零重写、检索评分不消费本列（core block 是新增可选消费方）；部分索引只覆盖 pinned=true。
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_mem_pinned ON memories (seq DESC) WHERE pinned;
