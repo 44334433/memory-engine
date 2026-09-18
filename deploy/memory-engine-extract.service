@@ -1,0 +1,7 @@
+[Unit]
+Description=memory-engine 图谱增量实体抽取（D5 生长循环）
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/memory-engine-extract.env
+WorkingDirectory=%h/.hermes/memory-engine
+ExecStart=/usr/bin/python3.12 scripts/llm_entity_extract.py --apply --limit 500 --batch-size 20

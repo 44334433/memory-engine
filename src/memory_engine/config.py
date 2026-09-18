@@ -52,6 +52,8 @@ DEDUP_SIM = float(os.environ.get("MEMORY_ENGINE_DEDUP_SIM", "0.97"))  # cos 相�
 DEDUP_DAYS = int(os.environ.get("MEMORY_ENGINE_DEDUP_DAYS", "3"))     # 近 N 天语义判重窗口
 
 BANKS = ("hermes", "hermes-sessions", "knowledge", "reflection")
+# 评测/隔离专用 bank（env 逗号分隔扩展，与迁移 004 的 CHECK 对齐）
+BANKS = BANKS + tuple(b.strip() for b in os.environ.get("MEMORY_ENGINE_EXTRA_BANKS", "").split(",") if b.strip())
 PRIORITIES = (1, 2, 3, 4, 5)
 
 POOL_MIN = 2

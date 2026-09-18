@@ -1,0 +1,7 @@
+[Unit]
+Description=memory-engine 增量抽取每日 timer
+[Timer]
+OnCalendar=*-*-* 06:40:00
+Persistent=true
+[Install]
+WantedBy=timers.target
