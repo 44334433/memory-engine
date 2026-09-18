@@ -88,6 +88,8 @@ GET  /v1/health            four-truth check: db + model + warm + ready
 
 The engine tunes itself from its own traffic — four loops, all running today:
 
+> **Scope note, because reviewers read this differently than intended:** everything below optimizes *retrieval and memory behavior inside the engine*. Deliberately out of scope: learning that rewrites the host agent's prompts, policies, or actions — that loop belongs to the agent layer (e.g. lesson capture → constitution update in an agent framework). A memory backend that "improves agent behavior" by itself is an overreach signal, not a feature.
+
 - **Parameter self-tuning** (`scripts/param_autotune.py` + weekly systemd timer): mutates retrieval weights (RRF k / route weights), replays the eval question set per-question, and commits a new parameter snapshot only after two consecutive rounds beat the frozen baseline by ≥5%. Otherwise it rolls back and logs why. First scheduled run: dry-run.
 - **Use-it-or-lose-it** (lifecycle): the `access_events` table feeds the TTL state machine — memories that get recalled and *adopted* by the host get their lifespan extended; 90 days of zero access demotes them toward decay. Memory that is never used stops costing retrieval quality.
 - **Failure backflow** (`src/memory_engine/hard_queries.py`): every recall that returns nothing (or a below-threshold top score) lands in a hard-query pool. Periodic analysis turns the pool into concrete tuning proposals instead of letting failures evaporate.
@@ -175,6 +177,20 @@ The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6
 - **CJK-first FTS.** PGroonga is load-bearing for Chinese recall; English-only deployments may prefer to swap in a different FTS extension.
 - **One embedder opinionated.** Qwen3-Embedding-0.6B fp16 on CUDA was chosen after measurement (see `docs/`); CPU-only hosts work but latency budgets change.
 - **uuid7 variant bits** are not fully RFC 9562-conformant yet (time-prefix semantics verified; tracked in issues).
+
+## Scaling path (what changes when single-host stops being enough)
+
+"No sharding story" above is a scope statement, not a dead end. The measured headroom and the ordered escalation are public so nobody has to guess:
+
+| Stage | Trigger signal (not a date) | Work |
+|---|---|---|
+| S0 (today) | — | single host; P95 recall 21-31 ms at 6k entries (line: 200 ms) |
+| S1 replica-ready | need ≥2 daemon copies, or GPU contention on embedder startup | embedder served separately via the pluggable provider (already `openai_compat`-ready); decision-state (param snapshots, word lists) converges into PG with advisory-lock single-writer — 1.5-2.5 days |
+| S2 multi-host | a second host genuinely connects | `tenant_id`/`agent_id` columns exist already; add quota isolation + privacy boundary + recall filtering — 3-5 days |
+| S3 asset-grade durability | the memory store becomes someone's production asset | PG streaming replication + remote standby (export JSONL already provides logical cross-version backup) — engine code unchanged |
+| S4 hosted service | explicit product decision | billing, tenant console, observability — a different product, not on this roadmap |
+
+What is deliberately *not* planned: migrating to a distributed vector DB (pgvector + HNSW stays 10 ms-class to millions of rows — a cluster buys nothing here) or splitting the daemon into microservices (the single binary is the point).
 
 ## Positioning
 
