@@ -66,7 +66,7 @@ Single binary process, single database, no external services. The embedder is wa
 | **Disaster recovery** | PG snapshots + timer, plus full logical export (`GET /v1/export`) | RTO measured at 2.5 s |
 | **Multi-host ready** | `tenant_id` / `agent_id` columns already in schema; isolation enforcement lands when a second host actually connects | schema now, enforcement on trigger |
 | **Embedder swap** | pluggable: local Qwen3 or any OpenAI-compatible endpoint, one config line | re-embedding versioned via `embed_ver` |
-| **Graph visualization** | zero-build single-file UI (`deploy/graph.html`, sigma.js WebGL) + read-only `GET /v1/graph` | 672 nodes / 3.4k edges rendered client-side |
+| **Graph visualization** | zero-build single-file UI (`deploy/graph.html`, sigma.js WebGL) + read-only `GET /v1/graph` | 11k edges / 2.4k entities on the production corpus |
 | **Image attachments** | `POST /v1/memories/{id}/attachments` — content-addressed storage, optional VLM caption (degrades gracefully if unconfigured), caption embedded with the same text embedder | no images-in-vector yet by design (caption-mediated, Mem0-style) |
 
 ## API surface
@@ -97,7 +97,7 @@ Two honesty notes: the self-tuning gate uses paired per-question testing (not ag
 
 ## Knowledge graph
 
-Beyond vectors and full-text, the schema carries an entity-relation layer (`entities` / `edges`, lightweight, no separate graph DB): memories are linked by extracted entities, and recall runs a fourth route over the graph — a one-hop pull-back catches the related memory that vector similarity missed. The graph ships with a **zero-build visualization UI** (`deploy/graph.html` — single file, graphology + sigma.js v3 via CDN, served next to the daemon: filter by bank/domain, click a node for full memory provenance) and a read-only `GET /v1/graph` endpoint. Multi-hop traversal and supersede-chain queries are on the roadmap; if you want a full property graph engine with a browser, this is still not that tool.
+Beyond vectors and full-text, the schema carries an entity-relation layer (`entities` / `edges`, lightweight, no separate graph DB): memories are linked by extracted entities, and recall runs a fourth route over the graph — a one-hop pull-back catches the related memory that vector similarity missed. The graph is no longer a toy: LLM extraction ran over the full production corpus (**2,463 entities, ~8k semantic edges** on top of 3.5k co-occurrence edges, 2026-09-18), with typed relations (related / parent_child / causal / contradicts). The graph ships with a **zero-build visualization UI** (`deploy/graph.html` — single file, graphology + sigma.js v3 via CDN, served next to the daemon: filter by bank/domain, click a node for full memory provenance) and a read-only `GET /v1/graph` endpoint. Entity disambiguation, multi-hop traversal and supersede-chain queries are on the roadmap; if you want a full property graph engine with a browser, this is still not that tool.
 
 ## Quick Start
 
