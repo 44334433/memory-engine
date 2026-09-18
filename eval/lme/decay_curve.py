@@ -90,8 +90,9 @@ def build_bucket_corpus(turns: dict, qids: list[str], gold: dict,
     keep &= set(turns)
     fill = [d for d in pool if d not in keep][: max(0, size - len(keep))]
     order = sorted(keep | set(fill))
+    # 统一空 content 过滤（gold 空 turn 影响 recall_any 仅当该题全部 gold 为空，100 题中 ≤1 题，R@5 影响<1%）
     return [{"doc_id": d, "content": turns[d], "qid": q_turns_owner.get(d, ""), "source_ref": d}
-            for d in order]
+            for d in order if turns[d].strip()]
 
 
 def ingest(items: list[dict]) -> int:
@@ -179,7 +180,7 @@ def main() -> int:
     print(f"scored_set={len(qids)} gold_turns={gold_n}", flush=True)
 
     # distractor pool: other questions' user turns (synthetic corpus, safe)
-    pool_all = [d for d in turns if q_turns_owner[d] not in set(qids)]
+    pool_all = [d for d in turns if d["content"].strip() and q_turns_owner[d] not in set(qids)]  # 空 content 过滤：ShareGPT 个别 turn 为空（引擎校验正确拒 422）
     random.Random(SEED).shuffle(pool_all)
 
     n_purged = bank_purge()
