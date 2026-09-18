@@ -8,7 +8,7 @@ import psycopg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
-from . import config, db, poison_gate, recall as recall_mod
+from . import config, db, memory_type as mtype, poison_gate, recall as recall_mod
 from . import hard_queries
 from .util import content_hash, dedup_hash, derive_title, staleness_of, uuid7, vec_to_pg
 
@@ -45,6 +45,14 @@ class RetainItem(BaseModel):
     contains_pii: Optional[bool] = None  # 投毒闸预留：PII 判级待拍板，本批只入库
     tenant_id: Optional[str] = None      # P1 二批：多宿主留位（缺省 None=单宿主不分区）
     agent_id: Optional[str] = None
+    memory_type: Optional[str] = None    # W2 分层：缺省 None=按内容启发式自动打标（memory_type.classify）
+
+    @field_validator("memory_type")
+    @classmethod
+    def _memory_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in config.MEMORY_TYPES:
+            raise ValueError(f"memory_type 必须为 {config.MEMORY_TYPES}，收到 {v!r}")
+        return v
 
     @field_validator("source_tier")
     @classmethod
@@ -141,6 +149,8 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
                     ttl_state=entry_state, ttl_expires_days=expires_days,
                     source_tier=it.source_tier, contains_pii=it.contains_pii,
                     tenant_id=it.tenant_id, agent_id=it.agent_id,   # P1 二批：多宿主留位
+                    memory_type=it.memory_type or mtype.classify(
+                        f"{it.title or ''}\n{it.content}"),           # W2：显式类型优先，缺省启发式
                 )
             except psycopg.errors.UniqueViolation:
                 # P1 判重 UNIQUE 兜底：并发竞态撞 UNIQUE(bank, dedup_key) → 返回既有条目（非 500 不重试炸）；

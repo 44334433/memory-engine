@@ -1,0 +1,162 @@
+{
+  "config": {
+    "bank": "eval_decay",
+    "engine": "http://127.0.0.1:8767",
+    "seed": 42,
+    "n_scored_questions": 100,
+    "gold_turns": 204,
+    "topk": 50,
+    "buckets": [
+      500,
+      1000,
+      2000,
+      4000,
+      6000
+    ],
+    "mode": "global (bank-wide top-k, no tag filter)",
+    "scorer": "LongMemEval official eval_utils",
+    "corpus": "LongMemEval-S synthetic haystack turns only (no production data)"
+  },
+  "buckets": [
+    {
+      "bucket_size": 500,
+      "corpus_actual": 500,
+      "ingested": 498,
+      "rag5_turn": 0.97,
+      "turn": {
+        "recall_any@1": 0.97,
+        "recall_any@5": 0.97,
+        "recall_any@10": 0.97,
+        "recall_any@30": 0.97,
+        "recall_all@1": 0.32,
+        "recall_all@5": 0.91,
+        "recall_all@10": 0.94,
+        "recall_all@30": 0.94,
+        "ndcg_any@1": 0.97,
+        "ndcg_any@5": 0.9582,
+        "ndcg_any@10": 0.9572,
+        "ndcg_any@30": 0.9572
+      },
+      "session": {
+        "recall_any@1": 0.97,
+        "recall_any@5": 0.97,
+        "recall_any@10": 0.97,
+        "recall_any@30": 0.97,
+        "recall_all@1": 0.35,
+        "recall_all@5": 0.92,
+        "recall_all@10": 0.94,
+        "recall_all@30": 0.94,
+        "ndcg_any@1": 0.97,
+        "ndcg_any@5": 0.9572,
+        "ndcg_any@10": 0.9572,
+        "ndcg_any@30": 0.9572
+      },
+      "elapsed_s": 264.8
+    },
+    {
+      "bucket_size": 1000,
+      "corpus_actual": 1000,
+      "ingested": 499,
+      "rag5_turn": 0.96,
+      "turn": {
+        "recall_any@1": 0.96,
+        "recall_any@5": 0.96,
+        "recall_any@10": 0.96,
+        "recall_any@30": 0.96,
+        "recall_all@1": 0.32,
+        "recall_all@5": 0.89,
+        "recall_all@10": 0.92,
+        "recall_all@30": 0.92,
+        "ndcg_any@1": 0.96,
+        "ndcg_any@5": 0.9476,
+        "ndcg_any@10": 0.9466,
+        "ndcg_any@30": 0.9466
+      },
+      "session": {
+        "recall_any@1": 0.96,
+        "recall_any@5": 0.96,
+        "recall_any@10": 0.96,
+        "recall_any@30": 0.96,
+        "recall_all@1": 0.35,
+        "recall_all@5": 0.9,
+        "recall_all@10": 0.92,
+        "recall_all@30": 0.92,
+        "ndcg_any@1": 0.96,
+        "ndcg_any@5": 0.9466,
+        "ndcg_any@10": 0.9466,
+        "ndcg_any@30": 0.9466
+      },
+      "elapsed_s": 729.9
+    },
+    {
+      "bucket_size": 2000,
+      "corpus_actual": 2000,
+      "ingested": 992,
+      "rag5_turn": 0.94,
+      "turn": {
+        "recall_any@1": 0.94,
+        "recall_any@5": 0.94,
+        "recall_any@10": 0.94,
+        "recall_any@30": 0.94,
+        "recall_all@1": 0.3,
+        "recall_all@5": 0.85,
+        "recall_all@10": 0.88,
+        "recall_all@30": 0.88,
+        "ndcg_any@1": 0.94,
+        "ndcg_any@5": 0.919,
+        "ndcg_any@10": 0.9181,
+        "ndcg_any@30": 0.9181
+      },
+      "session": {
+        "recall_any@1": 0.94,
+        "recall_any@5": 0.94,
+        "recall_any@10": 0.94,
+        "recall_any@30": 0.94,
+        "recall_all@1": 0.33,
+        "recall_all@5": 0.86,
+        "recall_all@10": 0.88,
+        "recall_all@30": 0.88,
+        "ndcg_any@1": 0.94,
+        "ndcg_any@5": 0.9181,
+        "ndcg_any@10": 0.9181,
+        "ndcg_any@30": 0.9181
+      },
+      "elapsed_s": 1737.0
+    },
+    {
+      "bucket_size": 4000,
+      "corpus_actual": 4000,
+      "ingested": 1986,
+      "rag5_turn": 0.91,
+      "turn": {
+        "recall_any@1": 0.91,
+        "recall_any@5": 0.91,
+        "recall_any@10": 0.91,
+        "recall_any@30": 0.91,
+        "recall_all@1": 0.27,
+        "recall_all@5": 0.78,
+        "recall_all@10": 0.79,
+        "recall_all@30": 0.79,
+        "ndcg_any@1": 0.91,
+        "ndcg_any@5": 0.8713,
+        "ndcg_any@10": 0.8687,
+        "ndcg_any@30": 0.8687
+      },
+      "session": {
+        "recall_any@1": 0.91,
+        "recall_any@5": 0.91,
+        "recall_any@10": 0.91,
+        "recall_any@30": 0.91,
+        "recall_all@1": 0.3,
+        "recall_all@5": 0.8,
+        "recall_all@10": 0.81,
+        "recall_all@30": 0.81,
+        "ndcg_any@1": 0.91,
+        "ndcg_any@5": 0.8696,
+        "ndcg_any@10": 0.8687,
+        "ndcg_any@30": 0.8687
+      },
+      "elapsed_s": 3559.6
+    }
+  ]
+}

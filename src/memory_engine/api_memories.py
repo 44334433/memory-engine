@@ -27,6 +27,7 @@ LIST_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, 
              "verify_status, created_at, updated_at, original_date, access_count, adopt_count, "
              "source_tier, contains_pii, "
              "valid_at, invalid_at, is_current, tenant_id, agent_id, "   # P1 二批：双时序+多宿主
+             "memory_type, "                                             # W2 分层
              "(embedding IS NOT NULL) AS has_embedding")
 
 
@@ -46,8 +47,16 @@ class PatchRequest(BaseModel):
     original_date: Optional[str] = None
     tenant_id: Optional[str] = None      # P1 二批：多宿主留位
     agent_id: Optional[str] = None
-    supersede: bool = False              # P1 二批：true=双时序矛盾更新（旧条失效+新条重存，id 会变）
+    memory_type: Optional[str] = None    # W2 分层：类型可人工纠偏
+    supersede: bool = False              # P1 二批：双时序矛盾更新（旧条失效+新条重存，id 会变）
     valid_at: Optional[str] = None       # supersede 事件时间（缺省=now()；时间截断两侧同值）
+
+    @field_validator("memory_type")
+    @classmethod
+    def _mtype(cls, v):
+        if v is not None and v not in config.MEMORY_TYPES:
+            raise ValueError(f"memory_type 必须为 {config.MEMORY_TYPES}")
+        return v
 
     @field_validator("ttl_state")
     @classmethod
@@ -75,6 +84,7 @@ class PatchRequest(BaseModel):
 def list_memories(request: Request, bank: Optional[str] = None, state: Optional[str] = None,
                   owner: Optional[str] = None, domain: Optional[str] = None,
                   tenant_id: Optional[str] = None, agent_id: Optional[str] = None,
+                  memory_type: Optional[str] = None,
                   q: Optional[str] = None, limit: int = 20, offset: int = 0):
     eng = request.app.state.engine
     limit = max(1, min(limit, 200))
@@ -91,6 +101,8 @@ def list_memories(request: Request, bank: Optional[str] = None, state: Optional[
         where.append("tenant_id=%s"); params.append(tenant_id)   # P1 二批：多宿主可查
     if agent_id:
         where.append("agent_id=%s"); params.append(agent_id)
+    if memory_type:
+        where.append("memory_type=%s"); params.append(memory_type)  # W2 分层：类型过滤
     if q:
         where.append("search_text &@~ %s"); params.append(q)
     wsql = " AND ".join(where)
@@ -145,6 +157,8 @@ def patch_memory(mid: uuid.UUID, req: PatchRequest, request: Request):
             sets.append("tenant_id=%s"); params.append(req.tenant_id)   # P1 二批：多宿主可改
         if req.agent_id is not None:
             sets.append("agent_id=%s"); params.append(req.agent_id)
+        if req.memory_type is not None:
+            sets.append("memory_type=%s"); params.append(req.memory_type)  # W2：人工纠偏通道
         if req.ttl_state is not None:
             sets.append("ttl_state=%s"); params.append(req.ttl_state)
             if req.ttl_state == "retired":
@@ -214,6 +228,7 @@ def _patch_supersede(eng, conn, mid: uuid.UUID, cur: dict, req: "PatchRequest") 
         valid_at=_parse_dt(req.valid_at),
         tenant_id=req.tenant_id if req.tenant_id is not None else full["tenant_id"],
         agent_id=req.agent_id if req.agent_id is not None else full["agent_id"],
+        memory_type=req.memory_type if req.memory_type is not None else full["memory_type"],  # W2：谱系继承
     )
     res = db.supersede_memory(conn, mid, fields)
     if res is None:

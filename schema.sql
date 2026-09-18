@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS memories (
   visibility    text NOT NULL DEFAULT 'agent'
                 CHECK (visibility IN ('public','agent','private')),
   source_type   text NOT NULL,                     -- conversation|cron|doc|manual|migration
+  memory_type   text NOT NULL DEFAULT 'episodic'   -- W2 分层：semantic|procedural|episodic
+                CHECK (memory_type IN ('semantic','procedural','episodic')),    --（迁移 005 对齐）
   source_ref    text,                              -- 上游系统 document_id(迁移保留)/会话ID/路径
   priority      int  NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
   ttl_state     text NOT NULL DEFAULT 'candidate'
@@ -59,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_mem_updated    ON memories (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_mem_hash       ON memories (content_hash);
 CREATE INDEX IF NOT EXISTS idx_mem_tags       ON memories USING gin (tags jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_mem_stale      ON memories (staleness);
+CREATE INDEX IF NOT EXISTS idx_mem_type       ON memories (memory_type);  -- W2 分层：类型过滤
 -- 双时序：现行版本部分索引（P1 第二批）
 CREATE INDEX IF NOT EXISTS idx_mem_current    ON memories (valid_at DESC) WHERE is_current;
 -- 多宿主留位：非空才入索引（单宿主全 NULL 不占空间）

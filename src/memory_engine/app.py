@@ -27,7 +27,7 @@ PREWARM_OBJECTS = (
     "memories", "changelog", "access_events",
     "idx_vec_hermes", "idx_vec_sessions", "idx_vec_knowledge", "idx_vec_reflection",
     "idx_mem_fts", "idx_mem_bank_state", "idx_mem_owner_vis", "idx_mem_updated",
-    "idx_mem_hash", "idx_mem_tags",
+    "idx_mem_hash", "idx_mem_tags", "idx_mem_type",   # W2：类型过滤索引预热
 )
 
 

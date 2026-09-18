@@ -64,6 +64,12 @@ def validate_filters(filters: dict | None) -> None:
         bad = [v for v in vals if v not in _STALENESS_BUCKETS]
         if bad:
             raise ValueError(f"filters.staleness 仅允许 {_STALENESS_BUCKETS}，收到非法值 {bad}")
+    mt = f.get("memory_type")   # W2 分层：记忆类型过滤（str 或 list，非法值 400 带原因）
+    if mt is not None:
+        vals = list(mt) if isinstance(mt, (list, tuple)) else [mt]
+        bad = [v for v in vals if v not in config.MEMORY_TYPES]
+        if bad:
+            raise ValueError(f"filters.memory_type 仅允许 {config.MEMORY_TYPES}，收到非法值 {bad}")
 
 
 def _vis_sql(caller: str | None) -> tuple[str, list]:
@@ -91,6 +97,10 @@ def _filters_sql(filters: dict | None) -> tuple[str, list]:
     if f.get("staleness"):
         vals = f["staleness"] if isinstance(f["staleness"], (list, tuple)) else [f["staleness"]]
         sql += " AND staleness = ANY(%s::text[])"
+        params.append([str(v) for v in vals])
+    if f.get("memory_type"):    # W2 分层：三路由同一 extra_sql，天然全路生效
+        vals = f["memory_type"] if isinstance(f["memory_type"], (list, tuple)) else [f["memory_type"]]
+        sql += " AND memory_type = ANY(%s::text[])"
         params.append([str(v) for v in vals])
     if f.get("date_range"):
         dr = f["date_range"]
@@ -154,6 +164,11 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
     vis_sql, vis_params = _vis_sql(caller)
     extra_sql, extra_params = _filters_sql(filters)
     include_archived = bool((filters or {}).get("include_archived"))
+    # W2 终检闸：graph 邻拉路不携带 filters（既有语义，P1 二批），memory_type 过滤在 hydrate
+    # 后的评分层统一把关——任何路由漏过滤都不会把非目标类型泄进结果集。
+    mt_filter = (filters or {}).get("memory_type")
+    mt_allowed = (set(mt_filter) if isinstance(mt_filter, (list, tuple))
+                  else {mt_filter} if mt_filter else None)
     attempted = ("vector", "fts", "time") if qvec_pg is not None else ("fts", "time")
     rows_a: list = []
     rows_b: list = []
@@ -229,6 +244,8 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
         m = meta.get(mid)
         if m is None:
             continue
+        if mt_allowed is not None and m.get("memory_type") not in mt_allowed:
+            continue                          # W2 终检闸（图邻拉条目也过筛）
         pri = 0.9 + 0.05 * m["priority"]
         life = _life_factor(m["ttl_state"], m["verify_status"], include_archived)
         stale = config.STALE_WEIGHTS.get(m["staleness"], 1.0)
@@ -250,6 +267,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             "priority": m["priority"], "verify_status": m["verify_status"],
             "trigger_term": m["trigger_term"], "source_ref": m["source_ref"],
             "source_tier": m["source_tier"], "contains_pii": m["contains_pii"],
+            "memory_type": m["memory_type"],   # W2 分层：类型随结果透出
             "created_at": m["created_at"].isoformat() if m["created_at"] else None,
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })

@@ -145,11 +145,11 @@ INSERT INTO memories (
   id, bank, domain, trigger_term, title, body, body_ptr, tags, owner, visibility,
   source_type, source_ref, priority, ttl_state, ttl_expires_at, source_tier, contains_pii,
   original_date, staleness, embed_model, embed_dim, embed_ver, content_hash, embedding,
-  valid_at, dedup_key, tenant_id, agent_id)
+  valid_at, dedup_key, tenant_id, agent_id, memory_type)
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,
         now() + (%s || ' days')::interval,%s,%s,
         %s,%s,%s,%s,1,%s,%s::vector,
-        COALESCE(%s::timestamptz, now()),%s,%s,%s)
+        COALESCE(%s::timestamptz, now()),%s,%s,%s,COALESCE(%s::text, 'episodic'))
 RETURNING id, seq
 """
 # 阶段2：user 来源入场态 candidate（候选期 CANDIDATE_DAYS 天→trial，lifecycle 线程机械流转）。
@@ -159,6 +159,8 @@ RETURNING id, seq
 # 并发竞态下 DB 层 UNIQUE(bank, dedup_key) 兜底，冲突时应用层返回既有条目；存量回填见 scripts/migrations/。
 # P1 第二批（2026-09-16）：valid_at（事件时间，None→now()=created_at 同瞬）/tenant_id/agent_id 追加末位
 # （index 24-26；参数追加保持 13-23 位不动，P0 params 断言不回退）。
+# W2（2026-09-18）：memory_type 追加末位（index 27；同上惯例，既有位序全部不动）。
+# None→COALESCE 兜底 'episodic'（显式绑 NULL 会撞 NOT NULL，PG 不回退 DEFAULT）。
 
 
 def insert_memory(conn, **f) -> dict:
@@ -177,6 +179,7 @@ def insert_memory(conn, **f) -> dict:
                     f.get("dedup_key"),   # P1：判重 UNIQUE 兜底键（None=NULL，不参与部分唯一索引）
                     f.get("tenant_id"),   # P1 二批：多宿主留位（None=单宿主不分区）
                     f.get("agent_id"),
+                    f.get("memory_type"),  # W2：None→DEFAULT 'episodic'（PG 层兜底）
                 ),
             )
             row = dict(zip(["id", "seq"], cur.fetchone()))
@@ -237,7 +240,7 @@ def route_time(conn, bank, vis_sql, vis_params, limit: int, extra_sql: str, extr
 HYDRATE_COLS = ("id, seq, bank, domain, trigger_term, title, body, body_ptr, tags, owner, "
                 "visibility, source_type, source_ref, priority, ttl_state, staleness, "
                 "verify_status, created_at, updated_at, original_date, access_count, adopt_count, "
-                "source_tier, contains_pii")
+                "source_tier, contains_pii, memory_type")   # W2：memory_type 进召回结果
 
 
 def hydrate(conn, ids: list) -> dict:

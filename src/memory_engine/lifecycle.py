@@ -55,6 +55,28 @@ def _signal_exists_sql(days: int) -> str:
             "AND ae.kind IN ('recall_hit','adopted') AND ae.ts > now() - interval '%d days')" % days)
 
 
+# —————————————————— W2 分层：memory_type 差异化衰减窗（2026-09-18） ——————————————————
+# 衰减/归档/零访问四条轨的视界与信号窗统一乘 TYPE_DECAY_FACTORS（semantic 最慢 ×2、
+# procedural ×1.5、episodic ×1=基准——episodic 与拍板天数逐位相等，存量行为零变化）。
+# promote/revive（信号驱动升级）不分型。candidates() 预览与 scan 同判据（docstring 铁律）。
+
+def _type_days_case(base_days: int) -> str:
+    """SQL CASE：按 memory_type 得该轨道整数天（base × factor，四舍五入）。"""
+    parts = [f"WHEN '{t}' THEN {int(round(base_days * config.TYPE_DECAY_FACTORS.get(t, 1.0)))}"
+             for t in config.MEMORY_TYPES]
+    return f"(CASE memory_type {' '.join(parts)} ELSE {base_days} END)::int"
+
+
+def _typed_interval(base_days: int) -> str:
+    return f"(interval '1 day' * {_type_days_case(base_days)})"
+
+
+def _signal_exists_sql_typed(base_days: int) -> str:
+    return ("EXISTS (SELECT 1 FROM access_events ae WHERE ae.memory_id = m.id "
+            "AND ae.kind IN ('recall_hit','adopted') "
+            f"AND ae.ts > now() - {_typed_interval(base_days)})")
+
+
 def promote_candidates(conn) -> list[str]:
     """候选期届满（默认 6 天）自动转 trial——机械时间闸。"""
     return _transact(
@@ -95,27 +117,27 @@ def promote_trials(conn) -> list[str]:
 
 
 def decay_trials(conn) -> list[str]:
-    """trial 30d 无信号 → decaying（蓝图：trial 30天无信号）。"""
+    """trial 30d 无信号 → decaying（蓝图：trial 30天无信号；W2：窗口按类型缩放）。"""
     return _transact(
         conn,
         f"""SELECT id FROM memories m WHERE ttl_state='trial'
-             AND created_at <= now() - interval '{config.TRIAL_DECAY_DAYS} days'
-             AND NOT {_signal_exists_sql(config.TRIAL_DECAY_DAYS)}
+             AND created_at <= now() - {_typed_interval(config.TRIAL_DECAY_DAYS)}
+             AND NOT {_signal_exists_sql_typed(config.TRIAL_DECAY_DAYS)}
              LIMIT 500""",
         (),
-        "trial", "decaying", f"no_signal_{config.TRIAL_DECAY_DAYS}d")
+        "trial", "decaying", f"no_signal_{config.TRIAL_DECAY_DAYS}d_type_scaled")
 
 
 def decay_active(conn) -> list[str]:
-    """active 90d 无触发/采纳 → decaying（阶段2 拍板）。"""
+    """active 90d 无触发/采纳 → decaying（阶段2 拍板；W2：窗口按类型缩放）。"""
     return _transact(
         conn,
         f"""SELECT id FROM memories m WHERE ttl_state='active'
-             AND created_at <= now() - interval '{config.ACTIVE_DECAY_DAYS} days'
-             AND NOT {_signal_exists_sql(config.ACTIVE_DECAY_DAYS)}
+             AND created_at <= now() - {_typed_interval(config.ACTIVE_DECAY_DAYS)}
+             AND NOT {_signal_exists_sql_typed(config.ACTIVE_DECAY_DAYS)}
              LIMIT 500""",
         (),
-        "active", "decaying", f"no_trigger_{config.ACTIVE_DECAY_DAYS}d")
+        "active", "decaying", f"no_trigger_{config.ACTIVE_DECAY_DAYS}d_type_scaled")
 
 
 def revive_decaying(conn) -> list[str]:
@@ -160,10 +182,10 @@ def _decay_zero_access(conn, state: str) -> list[str]:
     return _transact(
         conn,
         f"""SELECT id FROM memories m WHERE ttl_state='{state}'
-             AND {_last_access_anchor_sql()} <= now() - interval '{config.L2_ZERO_ACCESS_DAYS} days'
+             AND {_last_access_anchor_sql()} <= now() - {_typed_interval(config.L2_ZERO_ACCESS_DAYS)}
              LIMIT 500""",
         (),
-        state, "decaying", f"l2_zero_access_{config.L2_ZERO_ACCESS_DAYS}d")
+        state, "decaying", f"l2_zero_access_{config.L2_ZERO_ACCESS_DAYS}d_type_scaled")
 
 
 def decay_zero_access(conn) -> list[str]:
@@ -197,15 +219,15 @@ def adopt_renew_count(conn) -> int:
 
 
 def archive_decaying(conn) -> list[str]:
-    """decaying 180d 无信号 → archived（hidden 不删，行保留、changelog 完整）。"""
+    """decaying 180d 无信号 → archived（hidden 不删，行保留、changelog 完整；W2：窗口按类型缩放）。"""
     return _transact(
         conn,
         f"""SELECT id FROM memories m WHERE ttl_state='decaying'
-             AND created_at <= now() - interval '{config.DECAY_ARCHIVE_DAYS} days'
-             AND NOT {_signal_exists_sql(config.DECAY_ARCHIVE_DAYS)}
+             AND created_at <= now() - {_typed_interval(config.DECAY_ARCHIVE_DAYS)}
+             AND NOT {_signal_exists_sql_typed(config.DECAY_ARCHIVE_DAYS)}
              LIMIT 500""",
         (),
-        "decaying", "archived", f"no_signal_{config.DECAY_ARCHIVE_DAYS}d")
+        "decaying", "archived", f"no_signal_{config.DECAY_ARCHIVE_DAYS}d_type_scaled")
 
 
 def scan(conn) -> dict:
@@ -265,16 +287,16 @@ def candidates(conn, now: datetime | None = None) -> dict:
     decaying = db.fetch_all(
         conn,
         f"""SELECT id, bank, title, ttl_state FROM memories m
-             WHERE ttl_state IN ('trial','active') AND created_at <= %s
-               AND NOT {_signal_exists_sql(config.TRIAL_DECAY_DAYS)}
-             ORDER BY created_at LIMIT 100""",
-        (now - timedelta(days=config.TRIAL_DECAY_DAYS),))
+             WHERE ttl_state IN ('trial','active')
+               AND created_at <= now() - {_typed_interval(config.TRIAL_DECAY_DAYS)}
+               AND NOT {_signal_exists_sql_typed(config.TRIAL_DECAY_DAYS)}
+             ORDER BY created_at LIMIT 100""")
     archiving = db.fetch_all(
         conn,
         f"""SELECT id, bank, title FROM memories m WHERE ttl_state='decaying'
-             AND created_at <= %s AND NOT {_signal_exists_sql(config.DECAY_ARCHIVE_DAYS)}
-             ORDER BY created_at LIMIT 100""",
-        (now - timedelta(days=config.DECAY_ARCHIVE_DAYS),))
+             AND created_at <= now() - {_typed_interval(config.DECAY_ARCHIVE_DAYS)}
+             AND NOT {_signal_exists_sql_typed(config.DECAY_ARCHIVE_DAYS)}
+             ORDER BY created_at LIMIT 100""")
     l2_upgrade = db.fetch_all(
         conn,
         f"""SELECT id, bank, title FROM memories m WHERE ttl_state='decaying'
@@ -286,7 +308,7 @@ def candidates(conn, now: datetime | None = None) -> dict:
         conn,
         f"""SELECT id, bank, title, ttl_state FROM memories m
              WHERE ttl_state IN ('trial','active')
-               AND {_last_access_anchor_sql()} <= now() - interval '{config.L2_ZERO_ACCESS_DAYS} days'
+               AND {_last_access_anchor_sql()} <= now() - {_typed_interval(config.L2_ZERO_ACCESS_DAYS)}
              ORDER BY created_at LIMIT 100""")
     return {"promote": promote,
             "decay": [{"id": str(r["id"]), "bank": r["bank"], "title": r["title"],
