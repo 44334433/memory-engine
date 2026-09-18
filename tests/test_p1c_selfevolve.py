@@ -46,6 +46,7 @@ def pg():
               ttl_state text NOT NULL DEFAULT 'active', ttl_expires_at timestamptz,
               staleness text NOT NULL DEFAULT 'fresh', verify_status text NOT NULL DEFAULT 'unverified',
               source_tier text NOT NULL DEFAULT 'agent',
+              memory_type text NOT NULL DEFAULT 'episodic',   -- W2：lifecycle 分型衰减 CASE 引用（镜像须补列）
               access_count int NOT NULL DEFAULT 0, adopt_count int NOT NULL DEFAULT 0,
               created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
               last_accessed_at timestamptz)""")
@@ -122,8 +123,9 @@ def test_l2_adopt_upgrade_and_zero_access_decay(pg):
     assert m_act_zero in decayed and m_act_old in decayed and m_tri_never in decayed
     assert m_act_fresh not in decayed and m_tri_young not in decayed and m_tri_other_kind not in decayed
     assert _state_of(pg, m_act_zero) == "decaying" and _state_of(pg, m_tri_young) == "trial"
-    assert f"l2_zero_access_{config.L2_ZERO_ACCESS_DAYS}d" in _reasons(pg, m_act_zero)
-    assert f"l2_zero_access_{config.L2_ZERO_ACCESS_DAYS}d" in _reasons(pg, m_tri_never)
+    # W2 分型后 zero-access 规则 reason 带 _type_scaled 后缀（episodic 系数=1.0，90d 窗口不变——断言同步）
+    assert f"l2_zero_access_{config.L2_ZERO_ACCESS_DAYS}d_type_scaled" in _reasons(pg, m_act_zero)
+    assert f"l2_zero_access_{config.L2_ZERO_ACCESS_DAYS}d_type_scaled" in _reasons(pg, m_tri_never)
 
     # —— 延寿观测计数（read-only）：active+adopted≤30d 可见 ——
     m_renew = _seed(pg, "active", 100)

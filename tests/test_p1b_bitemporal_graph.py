@@ -34,7 +34,7 @@ def _meta(mid: str) -> dict:
             "staleness": "fresh", "source_tier": "agent", "title": "t", "body": "b", "body_ptr": None,
             "bank": "hermes", "domain": "d", "tags": [], "owner": "main", "visibility": "agent",
             "trigger_term": None, "source_ref": None, "contains_pii": None,
-            "created_at": None, "updated_at": None}
+            "created_at": None, "updated_at": None, "memory_type": "episodic"}   # W2：recall 结果透出类型列
 
 
 class _OkEmbedder:
@@ -91,6 +91,8 @@ def pg():
               embed_ver int NOT NULL DEFAULT 1, content_hash text NOT NULL DEFAULT 'h',
               embedding vector(1024), source_tier text NOT NULL DEFAULT 'agent',
               contains_pii boolean, dedup_key text, original_date timestamptz,
+              memory_type text NOT NULL DEFAULT 'episodic',   -- W2：RETAIN_SQL index 27（镜像须随生产 SQL 补列）
+              pinned boolean NOT NULL DEFAULT false,          -- W1：RETAIN_SQL index 28
               created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
               search_text text GENERATED ALWAYS AS (title || ' ' || body) STORED)""")
         cur.execute("CREATE TABLE changelog (seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
@@ -232,11 +234,12 @@ def test_tenant_agent_filter_and_retain_plumbing(monkeypatch):
     db.insert_memory(_FakeConn(), **_mem_fields(tenant_id="t1", agent_id="a1"))
     retain_sql, retain_params = captured[0]                 # 首条 = RETAIN_SQL（次条 = changelog）
     assert "tenant_id, agent_id" in retain_sql
-    assert list(retain_params[-2:]) == ["t1", "a1"]         # 追加末位，P0 params[13..16] 不动
+    # P1 二批位序契约：tenant/agent=index 25/26（W2 memory_type=27、W1 pinned=28 只追加末位，不动既有位）
+    assert list(retain_params[25:27]) == ["t1", "a1"]
     db.insert_memory(_FakeConn(), **_mem_fields())          # 单宿主不传 → NULL（不分区）
     retain_sql2, retain_params2 = captured[2]
     assert "tenant_id, agent_id" in retain_sql2
-    assert list(retain_params2[-2:]) == [None, None]
+    assert list(retain_params2[25:27]) == [None, None]
 
 
 # —————————————————— ⑤ contradicts 边只记不动 memories（G15 observe-only） ——————————————————

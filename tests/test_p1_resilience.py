@@ -32,7 +32,9 @@ def _meta(mid: str, source_tier: str = "agent") -> dict:
             "verify_status": "unverified", "staleness": "fresh", "source_tier": source_tier,
             "title": "t", "body": "b", "body_ptr": None, "bank": "hermes", "domain": "d",
             "tags": [], "owner": "main", "visibility": "agent", "trigger_term": None,
-            "source_ref": None, "contains_pii": None, "created_at": None, "updated_at": None}
+            "source_ref": None, "contains_pii": None, "created_at": None, "updated_at": None,
+            "memory_type": "episodic",   # W2：recall hydrate 透出类型列（fake meta 须同步）
+        }
 
 
 class _BoomEmbedder:
