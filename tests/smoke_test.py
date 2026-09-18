@@ -160,6 +160,45 @@ def main() -> int:
                                         "caller": "main", "top_k": 3})
     check("patch.recall_after_patch", st == 200 and any(x["id"] == mid for x in r.get("results", [])), "")
 
+    # 4b) W1 核心记忆块 core-block（2026-09-18）：形状/默认值/pin→入块/unpin→出块/预算闸/P95
+    st, cb0 = req("GET", "/v1/core-block")
+    check("core_block.shape", st == 200 and all(
+        k in cb0 for k in ("text", "ids", "budget_chars", "used_chars", "truncated", "took_ms"))
+        and len(cb0.get("text", "")) <= 1500, f"{st}")
+    st, rc = req("POST", "/v1/retain", {"bank": "hermes", "caller": "main", "items": [
+        {"content": f"核心记忆块冒烟条目 cbx7：钉住后应出现在常驻注入区 {int(time.time())}",
+         "context": "W1 core-block 冒烟（用后即删）", "source_tier": "user",
+         "memory_type": "semantic", "domain": "smoke"}]})
+    cmid = (rc.get("ids") or [""])[0]
+    CREATED_IDS.append(cmid)
+    check("core_block.retain", st == 200 and bool(cmid), f"{rc}")
+    st, mem = req("GET", f"/v1/memories/{cmid}")
+    check("core_block.default_unpinned", st == 200 and mem.get("pinned") is False, f"{mem.get('pinned')}")
+    st, _ = req("GET", "/v1/core-block")
+    check("core_block.fresh_not_in", cmid not in _.get("ids", []), "")
+    st, p = req("PATCH", f"/v1/memories/{cmid}", {"pinned": True})
+    check("core_block.patch_pin", st == 200 and p.get("pinned") is True, f"{st}")
+    st, cb1 = req("GET", "/v1/core-block")
+    check("core_block.pinned_in", st == 200 and cmid in cb1["ids"] and "cbx7" in cb1["text"],
+          f"in_ids={cmid in cb1.get('ids', [])}")
+    st, cb2 = req("GET", "/v1/core-block?budget_chars=120")
+    check("core_block.budget_gate", st == 200 and len(cb2.get("text", "")) <= 120,
+          f"len={len(cb2.get('text', ''))}")
+    st, p = req("PATCH", f"/v1/memories/{cmid}", {"pinned": False})
+    st2, cb3 = req("GET", "/v1/core-block")
+    check("core_block.unpinned_out", st == 200 and p.get("pinned") is False
+          and st2 == 200 and cmid not in cb3["ids"], "")
+    lat_cb = []
+    for _ in range(30):
+        t0 = time.perf_counter()
+        st, _r = req("GET", "/v1/core-block")
+        lat_cb.append((time.perf_counter() - t0) * 1000)
+        assert st == 200
+    lat_cb.sort()
+    p95_cb = lat_cb[int(len(lat_cb) * 0.95) - 1]
+    RESULTS["core_block_p95"] = round(p95_cb, 1)
+    check("core_block.p95_lt50ms", p95_cb < 50, f"p95={p95_cb:.1f}ms（验收线 50ms，环回含 HTTP 开销）")
+
     # 5) DELETE（retired 语义）+ purge
     st, r = req("DELETE", f"/v1/memories/{mid}")
     check("delete.retired", st == 200 and r.get("state") == "retired", f"{r}")
