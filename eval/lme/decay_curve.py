@@ -186,13 +186,18 @@ def main() -> int:
     n_purged = bank_purge()
     print(f"bank_purged={n_purged}", flush=True)
 
+    _prev = []
+    try:
+        _prev = json.load(open(f"{LME_DIR}/decay_results.json")).get("buckets", [])
+    except Exception:
+        pass
     results = {"config": {"bank": BANK, "engine": ENGINE, "seed": SEED,
                           "n_scored_questions": len(qids),
                           "gold_turns": gold_n, "topk": TOPK, "buckets": BUCKETS,
                           "mode": "global (bank-wide top-k, no tag filter)",
                           "scorer": "LongMemEval official eval_utils",
                           "corpus": "LongMemEval-S synthetic haystack turns only (no production data)"},
-               "buckets": []}
+               "buckets": [b for b in _prev if b["bucket_size"] not in BUCKETS]}  # 单桶续跑：未跑桶保留旧结果
     for size in BUCKETS:
         t0 = time.time()
         corpus = build_bucket_corpus(turns, qids, gold, pool_all, size)
