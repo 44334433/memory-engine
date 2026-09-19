@@ -127,7 +127,7 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
                     skipped += 1
                     continue
                 dup_id, _sim = db.semantic_dup(conn, req.bank, vec_to_pg(vec),
-                                               config.DEDUP_DAYS, config.DEDUP_SIM)
+                                               config.DEDUP_DAYS, config.dedup_cos_for(req.bank))
                 if dup_id:
                     skipped += 1
                     continue

@@ -173,6 +173,62 @@ TYPE_DECAY_FACTORS: dict[str, float] = {
     "episodic": 1.0,   # 基准不可配（兼容不变量）
 }
 
+# —— W4: per-bank adaptive thresholds (dedup cos / decay scale) ——
+# ★Single change point: per-bank defaults live ONLY in the two dicts below; all call sites
+#   read through dedup_cos_for()/decay_scale_for(). No threshold literals elsewhere.
+#   Env append/override "bank=v,bank2=v2" (same minimal-support style as MEMORY_ENGINE_EXTRA_BANKS).
+# Unregistered bank → global fallback (DEDUP_SIM / scale 1.0) = legacy behavior, zero drift.
+
+def _env_bank_map(var: str) -> dict[str, float]:
+    """Parse 'bank=v,bank2=v2' env overrides; malformed value crashes at import (fail-fast)."""
+    out: dict[str, float] = {}
+    for part in (p.strip() for p in os.environ.get(var, "").split(",")):
+        if part:
+            k, _, v = part.partition("=")
+            out[k.strip()] = float(v)
+    return out
+
+
+# Dedup cos, derived from measured nearest-neighbor distributions (2026-09-19, 150 most-recent
+# items per bank; full evidence in the batch report):
+#   hermes: 29.3% of samples sit in [0.95,0.97) and a 10-pair eyeball audit found ALL of them to
+#     be same-fact rewrites the old flat 0.97 let through → lower to 0.95.
+#   reflection: 13.3% in-band, sampled pairs likewise all rewrites → 0.95.
+#   knowledge: in-band pairs include distinct records differing only by an embedded id
+#     (cos 0.9655-0.9664); lowering would false-suppress them, and in-band ≥0.97 mass measured 0,
+#     so raising is near-lossless → 0.98.
+#   Rollback condition (written down): 30-day spot-check per changed bank; if false-skip rate of
+#     items landing in [new_threshold,0.97) exceeds 20% → revert that bank to the global 0.97.
+BANK_DEDUP_COS: dict[str, float] = {
+    "hermes": 0.95,
+    "reflection": 0.95,
+    "knowledge": 0.98,
+}
+BANK_DEDUP_COS = {**BANK_DEDUP_COS, **_env_bank_map("MEMORY_ENGINE_BANK_DEDUP_COS")}
+
+# Decay window scale (track days = base × TYPE_DECAY_FACTORS[type] × scale[bank], rounded).
+# From measured 30-day reuse signals (hits per item, whole-DB query 2026-09-19):
+#   hermes 10.1, knowledge 15.8 (high reuse → long-lived, ×1.5 longer windows);
+#   hermes-sessions 1.2 with 96.7% already faded (retired session-log bank, low value density
+#     → ×0.5 to speed it out of the way); reflection 4.4 mid → unregistered baseline 1.0
+#     (register only measured deviations, never blanket the map).
+BANK_DECAY_SCALE: dict[str, float] = {
+    "hermes": 1.5,
+    "knowledge": 1.5,
+    "hermes-sessions": 0.5,
+}
+BANK_DECAY_SCALE = {**BANK_DECAY_SCALE, **_env_bank_map("MEMORY_ENGINE_BANK_DECAY_SCALE")}
+
+
+def dedup_cos_for(bank: str) -> float:
+    """Per-bank dedup cos; unregistered bank falls back to global DEDUP_SIM (= legacy). Sole reader."""
+    return BANK_DEDUP_COS.get(bank, DEDUP_SIM)
+
+
+def decay_scale_for(bank: str) -> float:
+    """Per-bank decay window scale; unregistered falls back to 1.0 (= legacy). Sole reader."""
+    return BANK_DECAY_SCALE.get(bank, 1.0)
+
 # —— 自进化专项 #1（2026-09-18 拍板 a）：outcome 反馈 API（POST /v1/feedback）——
 OUTCOME_TYPES = ("adopted", "corrected", "useless")   # 三值语义对齐 Mem0 feedback
 # EMA 平滑系数（Cognee 边权重同构 w+=α(a−w)；量级=调研背书默认）。

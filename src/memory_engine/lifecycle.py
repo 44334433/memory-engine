@@ -59,16 +59,39 @@ def _signal_exists_sql(days: int) -> str:
 # 衰减/归档/零访问四条轨的视界与信号窗统一乘 TYPE_DECAY_FACTORS（semantic 最慢 ×2、
 # procedural ×1.5、episodic ×1=基准——episodic 与拍板天数逐位相等，存量行为零变化）。
 # promote/revive（信号驱动升级）不分型。candidates() 预览与 scan 同判据（docstring 铁律）。
+# W4（2026-09-19）：四条轨再乘 bank 级 scale（config.BANK_DECAY_SCALE，唯一变更点在 config）；
+# 未登记 bank 回退 scale=1.0 → 与 W2 输出逐字符相等（存量等价，tests/test_w4 断言）。
 
-def _type_days_case(base_days: int) -> str:
-    """SQL CASE：按 memory_type 得该轨道整数天（base × factor，四舍五入）。"""
-    parts = [f"WHEN '{t}' THEN {int(round(base_days * config.TYPE_DECAY_FACTORS.get(t, 1.0)))}"
+def _sql_lit(s: str) -> str:
+    """SQL 字符串字面量（bank 名单来自 config dict 键=代码常量，转义仅纵深防御）。"""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _type_days_case(base_days: int, bank_scale: float = 1.0) -> str:
+    """SQL CASE：按 memory_type 得该轨道整数天（base × bank_scale × type 因子，四舍五入）。
+
+    单参调用（bank_scale 缺省 1.0）输出与 W2 逐字符相等——存量等价不变量的实现基座。"""
+    parts = [f"WHEN '{t}' THEN {int(round(base_days * bank_scale * config.TYPE_DECAY_FACTORS.get(t, 1.0)))}"
              for t in config.MEMORY_TYPES]
-    return f"(CASE memory_type {' '.join(parts)} ELSE {base_days} END)::int"
+    return f"(CASE memory_type {' '.join(parts)} ELSE {int(round(base_days * bank_scale))} END)::int"
+
+
+def _bank_type_days_case(base_days: int) -> str:
+    """SQL CASE：bank 级 scale × W2 分型窗（W4）。
+
+    只为 scale≠1.0 的登记 bank 生成分支；映射为空/全 1.0 时输出与 _type_days_case
+    逐字符相等（=未登记回退现行为，四轨共用本唯一判据源）。"""
+    default = _type_days_case(base_days)
+    scaled = sorted((b, s) for b, s in config.BANK_DECAY_SCALE.items() if s != 1.0)
+    if not scaled:
+        return default
+    whens = " ".join(f"WHEN bank = {_sql_lit(b)} THEN {_type_days_case(base_days, s)}"
+                     for b, s in scaled)
+    return f"(CASE {whens} ELSE {default} END)::int"
 
 
 def _typed_interval(base_days: int) -> str:
-    return f"(interval '1 day' * {_type_days_case(base_days)})"
+    return f"(interval '1 day' * {_bank_type_days_case(base_days)})"
 
 
 def _signal_exists_sql_typed(base_days: int) -> str:
