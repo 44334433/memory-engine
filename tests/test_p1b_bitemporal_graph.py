@@ -93,6 +93,7 @@ def pg():
               contains_pii boolean, dedup_key text, original_date timestamptz,
               memory_type text NOT NULL DEFAULT 'episodic',   -- W2：RETAIN_SQL index 27（镜像须随生产 SQL 补列）
               pinned boolean NOT NULL DEFAULT false,          -- W1：RETAIN_SQL index 28
+              superseded_by uuid,                             -- 008 图谱深度批：supersede_memory 写谱系指针（镜像随生产补列）
               created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
               search_text text GENERATED ALWAYS AS (title || ' ' || body) STORED)""")
         cur.execute("CREATE TABLE changelog (seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "

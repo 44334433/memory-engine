@@ -173,3 +173,11 @@ ALTER TABLE memories ADD CONSTRAINT memories_polarity_range_check
 -- 存量行零重写、检索评分不消费本列（core block 是新增可选消费方）；部分索引只覆盖 pinned=true。
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS idx_mem_pinned ON memories (seq DESC) WHERE pinned;
+
+-- —— 图谱深度批：取代链谱系列（2026-09-19；存量库迁移+changelog 回填走 scripts/migrations/008）——
+-- superseded_by=supersede 后继版本指针（NULL=链上最新版），链多跳 GET /v1/memories/{id}/chain 沿指针走；
+-- FK 自引用 ON DELETE SET NULL：purge 硬删旧行时断链点显式留 NULL（chain 端点 truncated 旗标承认断链）。
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_by uuid
+  REFERENCES memories(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_mem_superseded_by ON memories (superseded_by)
+  WHERE superseded_by IS NOT NULL;

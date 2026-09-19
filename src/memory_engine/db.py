@@ -286,6 +286,8 @@ def supersede_memory(conn, old_id, fields: dict) -> dict | None:
             return None
         # 2) 新条 INSERT 重存（valid_at 与上面截断时刻同值；uq_mem_dedup 已收紧为仅现行版本判重）
         row = insert_memory(conn, **fields)
+        # 3) 谱系指针（迁移 008/图谱深度批）：旧条指向新条，取代链可 WITH RECURSIVE 直走
+        execute(conn, "UPDATE memories SET superseded_by=%s WHERE id=%s", (row["id"], old_id))
         log_changelog(conn, "supersede", old_id,
                       {"new_id": str(row["id"]), "valid_at": str(valid_at) if valid_at else "now()"})
     return {"old_id": str(old_id), "new_id": str(row["id"]),
