@@ -13,6 +13,7 @@ from datetime import datetime
 from . import config, db
 from .db import PgPool
 from .embedder import EmbeddingProvider
+from .reranker import Qwen3Reranker          # W3：仅类型注解；关=config.RERANK_ENABLED=false→eng.reranker=None，重排段整体跳过
 from .util import vec_to_pg
 
 log = logging.getLogger("memory-engine.recall")
@@ -166,7 +167,7 @@ def _graph_seeds(*route_rows: list) -> list:
 
 
 def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | None, caller: str | None,
-           top_k: int, filters: dict | None) -> dict:
+           top_k: int, filters: dict | None, reranker: "Qwen3Reranker | None" = None) -> dict:
     t0 = time.perf_counter()
     # —— P1 降级批：嵌入路失败→登记后跳过矢量路，降级纯 FTS+时序路（宁降级不 503/不炸调用）——
     failed_routes: dict[str, str] = {}
@@ -288,6 +289,25 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })
     scored.sort(key=lambda d: d["score"], reverse=True)
+    # —— W3 可插拔重排（RRF 融合+因子评分之后、top_k 截断之前）——
+    # 关（reranker=None）=本段整体条件跳过，零张量零分配，存量行为逐字节不变。
+    # 开=只对 top RERANK_TOP_N(20) 候选精排（#23 延迟预算）；乘法融合 final'=final×(floor+(1−floor)·p)，
+    #   不推翻 pri/life/stale/tier 拍板资产。重排是增强路非主路：失败→保留既有顺序+
+    #   degraded+failed_routes.rerank 显式降级（与 graph 路同语义，永不参与 503 判定，禁静默吞错）。
+    if reranker is not None:
+        cand = scored[:config.RERANK_TOP_N]
+        try:
+            docs = [((d["title"] or "") + "\n" + (d["body"] or "")).strip() for d in cand]
+            probs = reranker.score(query, docs)
+            for d, p in zip(cand, probs):
+                f = config.RERANK_FLOOR + (1.0 - config.RERANK_FLOOR) * p
+                d["score"] = round(d["score"] * f, 6)
+                d["score_parts"]["rerank"] = round(p, 6)   # P(yes) 透出（分数可解释契约）
+            scored.sort(key=lambda d: d["score"], reverse=True)
+        except Exception as e:  # noqa: BLE001 —— 增强路失败显式登记降级，保留重排前顺序
+            log.warning("rerank failed → keep pre-rerank order (degraded): %s", e)
+            failed_routes["rerank"] = str(e)[:300]
+            degraded = bool(failed_routes)
     routes = {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}
     if graph_attempted:
         routes["graph"] = len(rows_g)

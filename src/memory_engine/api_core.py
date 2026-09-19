@@ -185,7 +185,9 @@ def recall(req: RecallRequest, request: Request, bg: BackgroundTasks):
     eng = request.app.state.engine
     try:
         res = recall_mod.recall(eng.db, eng.embedder, req.query, req.bank, req.caller,
-                                max(1, min(req.top_k, 100)), req.filters)
+                                max(1, min(req.top_k, 100)), req.filters,
+                                # W3：None=关（缺省），零开销；getattr=兼容旧 fake engine（SimpleNamespace）
+                                reranker=getattr(eng, "reranker", None))
     except recall_mod.RecallRouteError as e:
         # P1 语义演进：503 只留给全路失败（部分路失败已在 recall 内降级为 200+degraded+failed_routes）
         raise HTTPException(503, detail={

@@ -23,6 +23,7 @@ from .api_feedback import router as feedback_router         # 自进化#1（2026
 from .api_core_block import router as core_block_router     # W1（2026-09-18）：GET /v1/core-block
 from .db import PgPool
 from .embedder import EmbeddingProvider, build_embedder
+from .reranker import Qwen3Reranker, build_reranker  # W3 可插拔重排（开关关=build_reranker()→None，不加载模型）
 
 log = logging.getLogger("memory-engine")
 
@@ -38,6 +39,7 @@ class Engine:
     def __init__(self) -> None:
         self.db: PgPool | None = None
         self.embedder: EmbeddingProvider | None = None
+        self.reranker: "Qwen3Reranker | None" = None   # W3：开关关（缺省）恒 None=重排段完全跳过
         self.ready = False
         self.warm = False
         self.model_loaded = False
@@ -106,6 +108,20 @@ async def lifespan(app: FastAPI):
             log.warning("embedder warmup failed (per-call degrade): %s", e)
     else:
         _spawn_embedder_selfheal(eng)                # 保活：降级态周期重试拉回全功能（2026-09-16）
+    # —— W3 可插拔重排：开关关（config.RERANK_ENABLED 缺省 false）=整段不执行，eng.reranker 恒 None，零开销 ——
+    if config.RERANK_ENABLED:
+        rr = build_reranker()
+        assert rr is not None, "RERANK_ENABLED=开时 build_reranker() 不应返回 None"
+        try:
+            rr.load()                                  # GPU 总量预算闸选设备（#25③），fp16 常驻
+            try:
+                rr.warmup()
+            except Exception as e:  # noqa: BLE001 —— 预热失败不炸启动，调用期按路降级
+                log.warning("reranker warmup failed (per-call degrade): %s", e)
+            eng.reranker = rr                          # 仅在模型真正就绪后挂上，None 语义=不重排
+        except Exception as e:  # noqa: BLE001 —— 与 embedder 同降级语义：加载失败不炸 daemon
+            log.error("reranker load FAILED → recall 保持无重排（degraded，self-heal 接管）: %s", e)
+            _spawn_reranker_selfheal(eng)
     _prewarm(eng.db)
     smoke = recall_mod.recall(eng.db, eng.embedder, "memory engine warmup 预热查询", None, "main", 3, {})
     warmup_budget_ms = int(os.environ.get("MEMORY_ENGINE_WARMUP_BUDGET_MS", "200"))
@@ -151,6 +167,29 @@ def _spawn_embedder_selfheal(eng) -> None:
                 log.warning("embedder self-heal attempt %d failed: %s", attempt, str(e)[:200])
 
     threading.Thread(target=_heal_loop, daemon=True, name="embedder-selfheal").start()
+
+
+def _spawn_reranker_selfheal(eng) -> None:
+    """保活线程（W3，embedder self-heal 同构）：reranker 加载失败后每 60s 重建+load+warmup，
+    成功即挂上 eng.reranker 拉回重排能力；期间 recall 走无重排路径（降级显式，不炸服务）。"""
+    import threading
+
+    def _heal_loop() -> None:
+        attempt = 0
+        while eng.reranker is None and config.RERANK_ENABLED:
+            attempt += 1
+            time.sleep(60)
+            try:
+                rr = build_reranker()
+                assert rr is not None
+                rr.load()
+                rr.warmup()
+                eng.reranker = rr
+                log.warning("reranker self-heal OK after %d attempts → 重排恢复", attempt)
+            except Exception as e:  # noqa: BLE001 —— 继续重试，不退出
+                log.warning("reranker self-heal attempt %d failed: %s", attempt, str(e)[:200])
+
+    threading.Thread(target=_heal_loop, daemon=True, name="reranker-selfheal").start()
 
 
 def create_app() -> FastAPI:
