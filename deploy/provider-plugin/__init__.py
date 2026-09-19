@@ -12,6 +12,11 @@ agent/memory_provider.py）：
 - on_session_switch(...)   flush-on-switch：旧会话缓冲落库 + 轮换 session 状态
 - on_session_end(msgs)     会话结束 flush 缓冲（防丢末段）
 - engine_recall/engine_retain 两个工具（tools 能力面）
+- auto outcome 上报（自进化粮草通道，2026-09-19）：auto_outcome=true 时宿主侧推断
+                           recall 命中被后续工具/回复引用→adopted、用户经内置 memory 工具
+                           纠正/删除召回内容→corrected，POST /v1/feedback 上报；
+                           默认关=存量零行为变化；同 (id,outcome) 防抖去重；useless 不推
+                           （推断噪声会污染 EMA 与 L3 困难样本池，见执行文档论证）
 - shutdown()               flush + writer 排空
 
 所有网络/解析路径 fail-open：引擎不可达 → 注入空串/静默，绝不阻塞 agent。
@@ -26,6 +31,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import urllib.request
@@ -51,7 +57,10 @@ def _load_provider_config() -> dict:
                  "recall_drop_gate": 1.10,  # 落差闸：相邻分数最大落差≥此值 → 注入落差点之上整群（纯相对，跨库漂移免疫）
                  "recall_floor": 2,         # 无显著落差时兜底注入条数（防漏关键）
                  "core_block": False,       # W1 核心记忆块：默认关=存量注入行为零变化（拍板纪律#6）
-                 "core_block_budget_chars": 1500}  # 引擎侧预算闸同参透传（freshness 注入闸同值）
+                 "core_block_budget_chars": 1500,  # 引擎侧预算闸同参透传（freshness 注入闸同值）
+                 "auto_outcome": False}     # 宿主自动 outcome 推断上报：默认关=零行为变化
+                                           # （provider.json 置 true 持久开启；env
+                                           #   MEMORY_ENGINE_AUTO_OUTCOME=1/0 即时覆盖）
     try:
         p = os.path.join(os.path.expanduser("~/.hermes/memory-engine"), "provider.json")
         if os.path.exists(p):
@@ -60,6 +69,9 @@ def _load_provider_config() -> dict:
     except Exception:
         pass
     cfg["url"] = str(os.environ.get("MEMORY_ENGINE_URL") or cfg["url"]).rstrip("/")
+    raw = os.environ.get("MEMORY_ENGINE_AUTO_OUTCOME")
+    if raw is not None and str(raw).strip() != "":
+        cfg["auto_outcome"] = str(raw).strip().lower() not in ("0", "false", "no", "off")
     return cfg
 
 
@@ -80,6 +92,12 @@ class MemoryEngineProvider(MemoryProvider):
         self._last_recall_returned = False
         self._last_recall_count = 0
         self._shutting_down = threading.Event()
+        # auto outcome 状态（默认关，开启后才写入；全部进程内，重启丢防抖窗可接受——
+        # 引擎侧 EMA 幂等收敛 + changelog 全留痕，重复上报代价极小）
+        self._pending_recalls: Dict[str, dict] = {}   # memory_id -> {q,b,t,ts}
+        self._outcome_sent: Dict[tuple, float] = {}   # (memory_id,outcome) -> 上次上报 ts
+        self._outcome_lock = threading.Lock()
+        self._last_injected_text = ""                 # 上轮 recall 注入原文（回声剔除用）
 
     # ---------- 基础 ----------
     @property
@@ -180,6 +198,9 @@ class MemoryEngineProvider(MemoryProvider):
         lines: List[str] = []
         used = 0
         cap = self._cfg["recall_max_chars"]
+        track = bool(self._cfg.get("auto_outcome"))
+        if track:
+            self._last_injected_text = ""   # 本轮注入组装中；防残留旧注入参与回声剔除
         for i, r in enumerate(results, 1):
             title = (r.get("title") or "").strip()
             body = (r.get("body") or "").strip()
@@ -188,9 +209,13 @@ class MemoryEngineProvider(MemoryProvider):
             seg = meta + "\n" + body[:room]
             lines.append(seg)
             used += len(seg) + 2
+            if track:
+                self._track_recall_hit(r, query)
             if used >= cap:
                 break
         text = "\n\n".join(lines)
+        if track:
+            self._last_injected_text = text
         return text, len(results)
 
     def _format_recall(self, text: str) -> str:
@@ -296,6 +321,11 @@ class MemoryEngineProvider(MemoryProvider):
             return
         if session_id:
             self._session_id = str(session_id).strip()
+        if self._cfg.get("auto_outcome"):
+            try:
+                self._infer_adopted(user_content, assistant_content, messages)
+            except Exception as e:
+                logger.debug("auto-outcome adopt infer failed: %s", e)
         with self._buf_lock:
             self._turn_buffer.append(self._build_turn_text(user_content, assistant_content))
             self._turn_counter += 1
@@ -415,6 +445,169 @@ class MemoryEngineProvider(MemoryProvider):
             return f"已写入 {len(resp.get('ids') or [])} 条（dedup 跳过 {resp.get('dedup_skipped', 0)}）"
         return f"未知工具: {tool_name}"
 
+    # ---------- auto outcome（自进化粮草通道：宿主推断 → POST /v1/feedback） ----------
+    # 契约真源=引擎 outcome.py/api_feedback.py：adopted → L2 access_events(kind=adopted)
+    # + adopt_count+1 + EMA(+1 目标)；corrected → EMA(−1) + L3 hard_queries 落池
+    # （query 取本上报携带值，缺省引擎回退该条最近 recall_hit.query）。
+    # useless 同映射 −1 并落 L3 池——宿主侧「召回未被引证」推断precision 不足（注入经
+    # 落差闸+模型常转述，逐字引证≠唯一使用形态），推 useless 会以假阴性烧穿 L2 护盾
+    # 并往困难样本池灌噪（自进化反馈回路被假信号学习），故本批只推 adopted/corrected
+    # 两态，useless 待引证检测金标 precision 达标后另批拍板。
+    _AUTO_OUTCOME_CALLER = "host-auto-outcome"
+    _PENDING_TTL = 600.0      # 召回条目可归因窗口（秒）
+    _SENT_TTL = 86400.0       # 同 (id,outcome) 防抖去重窗（秒）
+    _PENDING_CAP = 64         # 在跟踪召回条目上限（超限驱逐最旧）
+    _MIN_BODY_WIN = 16        # body 匹配窗最小可用长度（去空白后）
+    _MIN_TITLE_WIN = 10
+    _MIN_CORR_TEXT = 16       # corrected 触发文本最小长度
+
+    @staticmethod
+    def _norm_text(s: Any) -> str:
+        """匹配规整化：去全部空白 + 小写（中文场景空白噪声/换行截断免疫）。"""
+        return re.sub(r"\s+", "", str(s if s is not None else "")).lower()
+
+    def _track_recall_hit(self, r: dict, query: str) -> None:
+        """_do_recall 注入成功即登记候选（只记真正进注入文本的条目，被 cap 截断的不记）。"""
+        mid = str(r.get("id") or "")
+        if not mid:
+            return
+        now = time.time()
+        e = {"q": (query or "")[:200],
+             "b": self._norm_text(r.get("body"))[:400],
+             "t": self._norm_text(r.get("title"))[:120],
+             "ts": now}
+        with self._outcome_lock:
+            self._pending_recalls[mid] = e
+            for stale in [m for m, v in self._pending_recalls.items()
+                          if now - v["ts"] > self._PENDING_TTL]:
+                self._pending_recalls.pop(stale, None)
+            while len(self._pending_recalls) > self._PENDING_CAP:
+                oldest = min(self._pending_recalls, key=lambda m: self._pending_recalls[m]["ts"])
+                self._pending_recalls.pop(oldest, None)
+
+    def _adopt_windows(self, e: dict) -> List[str]:
+        """adopted 判定窗：body 头部/中段两个 32 字窗 + title 32 字窗（宁缺毋滥）。"""
+        b, t = e.get("b", ""), e.get("t", "")
+        wins = set()
+        if len(b) >= self._MIN_BODY_WIN:
+            wins.add(b[:32])
+            if len(b) >= 56:
+                wins.add(b[24:56])
+        if len(t) >= self._MIN_TITLE_WIN:
+            wins.add(t[:32])
+        return list(wins)
+
+    def _turn_blob(self, user_content: str, assistant_content: str,
+                   messages: Optional[List[dict]]) -> str:
+        """本轮可归因文本 = 最终回复 + 用户消息（剔除引擎注入回声）+ 本轮工具
+        调用参数与工具结果（messages 尾部、截到最后一条 user 消息为止）。"""
+        parts = [assistant_content or ""]
+        uc = user_content or ""
+        inj = self._last_injected_text
+        if inj:
+            uc = uc.replace(inj, "")
+        parts.append(uc)
+        for m in reversed(messages or []):
+            role = m.get("role")
+            if role == "user":
+                break
+            if role == "assistant":
+                c = m.get("content")
+                if isinstance(c, str):
+                    parts.append(c)
+                for tc in (m.get("tool_calls") or []):
+                    fn = (tc or {}).get("function") or {}
+                    parts.append(str(fn.get("arguments") or ""))
+            elif role == "tool":
+                parts.append(str(m.get("content") or ""))
+        return self._norm_text("\n".join(parts))
+
+    def _infer_adopted(self, user_content: str, assistant_content: str,
+                       messages: Optional[List[dict]]) -> None:
+        """recall 命中被后续工具/回复逐字引用 → adopted（高精度逐字窗匹配）。"""
+        now = time.time()
+        with self._outcome_lock:
+            pend = [(mid, dict(e)) for mid, e in self._pending_recalls.items()
+                    if now - e["ts"] <= self._PENDING_TTL]
+        if not pend:
+            return
+        blob = self._turn_blob(user_content, assistant_content, messages)
+        if not blob:
+            return
+        for mid, e in pend:
+            if any(w in blob for w in self._adopt_windows(e) if w):
+                self._submit_outcome(mid, "adopted", e.get("q", ""))
+                with self._outcome_lock:
+                    self._pending_recalls.pop(mid, None)
+
+    def _match_corrected(self, norm: str) -> List[str]:
+        """纠正/删除文本与最近召回条目的高重叠匹配（24 字窗双向包含）。"""
+        now = time.time()
+        with self._outcome_lock:
+            items = [(mid, dict(e)) for mid, e in self._pending_recalls.items()
+                     if now - e["ts"] <= self._PENDING_TTL]
+        head = norm[:24]
+        hits: List[str] = []
+        for mid, e in items:
+            b, t = e.get("b", ""), e.get("t", "")
+            wb, wt = b[:24], t[:24]
+            if ((len(wb) >= self._MIN_BODY_WIN and (wb in norm or (len(head) >= 16 and head in b)))
+                    or (len(wt) >= self._MIN_TITLE_WIN and (wt in norm or (len(head) >= 16 and head in t)))):
+                hits.append(mid)
+        return hits
+
+    def on_memory_write(self, action: str, target: str, content: str,
+                        metadata: Optional[Dict[str, Any]] = None) -> None:
+        """内置 memory 工具 remove/replace → 若命中最近召回条目 → corrected。
+        replace 优先取 metadata.old_text（被纠正的旧文本才是纠错对象）。"""
+        if not self._cfg.get("auto_outcome"):
+            return
+        if action not in ("replace", "remove"):
+            return
+        try:
+            text = ""
+            if action == "replace" and metadata:
+                text = str(metadata.get("old_text") or "")
+            if not text:
+                text = content or ""
+            norm = self._norm_text(text)
+            if len(norm) < self._MIN_CORR_TEXT:
+                return
+            for mid in self._match_corrected(norm):
+                with self._outcome_lock:
+                    e = self._pending_recalls.pop(mid, None)
+                self._submit_outcome(mid, "corrected", (e or {}).get("q", ""))
+        except Exception as e:
+            logger.debug("auto-outcome on_memory_write failed: %s", e)
+
+    def _submit_outcome(self, memory_id: str, outcome: str, query: str = "") -> bool:
+        """防抖去重（同 id+outcome 24h 窗内一次）+ writer 队列异步上报，fail-open。
+        上报失败回滚防抖键，下轮匹配可重试（至多一次语义可接受，引擎端 EMA 收敛幂等）。"""
+        now = time.time()
+        key = (memory_id, outcome)
+        with self._outcome_lock:
+            last = self._outcome_sent.get(key)
+            if last is not None and now - last < self._SENT_TTL:
+                return False
+            if len(self._outcome_sent) > 1024:
+                for k in sorted(self._outcome_sent, key=lambda kk: self._outcome_sent[kk])[:256]:
+                    self._outcome_sent.pop(k, None)
+            self._outcome_sent[key] = now
+        payload: Dict[str, Any] = {"memory_id": memory_id, "outcome": outcome,
+                                   "caller": self._AUTO_OUTCOME_CALLER}
+        if query:
+            payload["query"] = query[:200]
+
+        def _job():
+            if self._post("/v1/feedback", payload, timeout=5.0) is None:
+                with self._outcome_lock:
+                    self._outcome_sent.pop(key, None)
+
+        self._ensure_writer()
+        self._writer_queue.put(_job)
+        logger.info("memory-engine auto-outcome: %s -> %s", outcome, memory_id)
+        return True
+
     # ---------- 收尾 ----------
     def shutdown(self) -> None:
         logger.debug("memory-engine shutdown: flush + drain")
@@ -438,6 +631,7 @@ class MemoryEngineProvider(MemoryProvider):
             {"key": "retain_every_n_turns", "label": "每 N 轮落库", "type": "int", "value": self._cfg["retain_every_n_turns"]},
             {"key": "recall_top_k", "label": "recall 条数", "type": "int", "value": self._cfg["recall_top_k"]},
             {"key": "core_block", "label": "W1 核心记忆块常驻注入（宿主拉取式）", "type": "bool", "value": self._cfg["core_block"]},
+            {"key": "auto_outcome", "label": "宿主自动 outcome 推断上报（adopted/corrected，默认关）", "type": "bool", "value": self._cfg["auto_outcome"]},
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
