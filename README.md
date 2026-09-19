@@ -78,6 +78,7 @@ Short ADR-style notes for the trade-offs reviewers ask about. Each: the call, wh
 | **Lifecycle TTL** | six-state machine (trial → active → … → retired → deleted): adoption extends life, 90 days of zero access decays | unused memory stops costing quality |
 | **Disaster recovery** | PG snapshots + timer, plus full logical export (`GET /v1/export`) | RTO measured at 2.5 s |
 | **Multi-host ready** | `tenant_id` / `agent_id` columns + PG row-level-security migration (`scripts/migrations/008_rls.sql`, session pass-through when unset) + `MULTI_TENANT` recall filter — both default **off** | zero behavior change until a host opts in (enable in 3 steps below) |
+| **LangChain ready** | `integrations/langchain_memory.py` — `BaseRetriever` + memory class over plain HTTP (`requests` only); importable with shims when langchain isn't installed | hermetic mock-HTTP tests (`tests/test_langchain_adapter.py`) |
 | **Embedder swap** | pluggable: local Qwen3 or any OpenAI-compatible endpoint, one config line | re-embedding versioned via `embed_ver` |
 | **Graph visualization** | zero-build single-file UI (`deploy/graph.html`, sigma.js WebGL) + read-only `GET /v1/graph` | 11k edges / 2.4k entities on the production corpus |
 | **Image attachments** | `POST /v1/memories/{id}/attachments` — content-addressed storage, optional VLM caption (degrades gracefully if unconfigured), caption embedded with the same text embedder | no images-in-vector yet by design (caption-mediated, Mem0-style) |
