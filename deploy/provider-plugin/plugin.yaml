@@ -2,8 +2,8 @@ name: memory-engine
 version: 1.0.0
 manifest_version: 1
 kind: standalone
-author: memory-engine contributors
-description: 自建记忆引擎 provider（PG18+pgvector+PGroonga+Qwen3-Embedding，daemon :8766）。prefetch 每轮 recall 注入 + sync_turn 会话落库（hermes-sessions bank，每 20 轮批量）+ on_pre_compress 压缩前摘录/召回注入 + on_session_switch flush-on-switch，对齐旧版记忆 provider 能力面。经 memory.provider 配置激活。
+author: Hermes memory engine phase-3 cutover (2026-09-16)
+description: 自建记忆引擎 provider（PG18+pgvector+PGroonga+Qwen3-Embedding，daemon :8766）。prefetch 每轮 recall 注入 + sync_turn 会话落库（hermes-sessions bank，每 20 轮批量）+ on_pre_compress 压缩前摘录/召回注入 + on_session_switch flush-on-switch，对齐 Hindsight provider 能力面。经 memory.provider 配置激活。
 provides_hooks:
   - on_pre_compress
   - on_session_switch

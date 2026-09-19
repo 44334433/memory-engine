@@ -1,8 +1,11 @@
 """MemoryEngineProvider —— 自建记忆引擎 memory provider（阶段3切主，2026-09-16）。
 
-对齐旧版记忆 provider 的能力面（参照宿主框架 agent/memory_provider.py ABC 接口）：
+对齐 Hindsight provider 能力面（参照 plugins/memory/hindsight/__init__.py + ABC
+agent/memory_provider.py）：
 
 - prefetch(query)          每轮 recall → 注入 <memory> 段（同步直查，引擎本地 pgvector 毫秒级）
+                           + W1 核心记忆块：core_block=true 时追加拉取 GET /v1/core-block →
+                           <core-memory> 段（宿主拉取式，同通道尾部注入；默认 false=零变化）
 - queue_prefetch(query)    后台预热下一轮（recall_sync=false 时启用）
 - sync_turn(u, a)          会话轮缓冲 → 每 20 轮批量 retain 到 hermes-sessions bank（writer 线程，不阻塞回复路径）
 - on_pre_compress(msgs)    压缩前：摘录 retain（tags=compression-preflush）+ recall 注入摘要 prompt（≤1200 字符）
@@ -13,7 +16,7 @@
 
 所有网络/解析路径 fail-open：引擎不可达 → 注入空串/静默，绝不阻塞 agent。
 bank 映射：会话轮→hermes-sessions；手动/工具 retain→hermes；recall=跨库（bank=null）。
-配置：MEMORY_ENGINE_URL（默认 http://localhost:8766），MEMORY_ENGINE_HOME/memory-engine/provider.json 可覆盖。
+配置：MEMORY_ENGINE_URL（默认 http://localhost:8766），~/.hermes/memory-engine/provider.json 可覆盖。
 """
 
 from __future__ import annotations
@@ -42,13 +45,15 @@ _GLYPH = "🧠"
 def _load_provider_config() -> dict:
     """provider.json > env > 默认。"""
     cfg: dict = {"url": _DEFAULT_URL, "auto_recall": True, "recall_sync": True,
-                 "retain_every_n_turns": 20, "recall_top_k": 6,
+                 "retain_every_n_turns": 20, "recall_top_k": 15,
                  "session_bank": "hermes-sessions", "manual_bank": "hermes",
-                 "recall_max_chars": 2000}
+                 "recall_max_chars": 2000,
+                 "recall_drop_gate": 1.10,  # 落差闸：相邻分数最大落差≥此值 → 注入落差点之上整群（纯相对，跨库漂移免疫）
+                 "recall_floor": 2,         # 无显著落差时兜底注入条数（防漏关键）
+                 "core_block": False,       # W1 核心记忆块：默认关=存量注入行为零变化（拍板纪律#6）
+                 "core_block_budget_chars": 1500}  # 引擎侧预算闸同参透传（freshness 注入闸同值）
     try:
-        base = os.environ.get("MEMORY_ENGINE_DIR") or os.path.join(
-            os.environ.get("MEMORY_ENGINE_HOME", os.path.expanduser("~/hermes-data")), "memory-engine")
-        p = os.path.join(base, "provider.json")
+        p = os.path.join(os.path.expanduser("~/.hermes/memory-engine"), "provider.json")
         if os.path.exists(p):
             with open(p, encoding="utf-8") as f:
                 cfg.update({k: v for k, v in json.load(f).items() if k in cfg})
@@ -92,9 +97,7 @@ class MemoryEngineProvider(MemoryProvider):
         return f"memory-engine daemon 不可达（{self._cfg['url']}/v1/health）"
 
     def backup_paths(self) -> List[str]:
-        base = os.environ.get("MEMORY_ENGINE_DIR") or os.path.join(
-            os.environ.get("MEMORY_ENGINE_HOME", os.path.expanduser("~/hermes-data")), "memory-engine")
-        return [os.path.join(base, "backups")]
+        return [os.path.expanduser("~/.hermes/memory-engine/backups")]
 
     # ---------- 生命周期 ----------
     def initialize(self, session_id: str, **kwargs: Any) -> None:
@@ -113,7 +116,55 @@ class MemoryEngineProvider(MemoryProvider):
             logger.debug("memory-engine POST %s failed: %s", path, e)
             return None
 
+    def _get(self, path: str, timeout: float = 5.0) -> Optional[dict]:
+        try:
+            with urllib.request.urlopen(f"{self._cfg['url']}{path}", timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            logger.debug("memory-engine GET %s failed: %s", path, e)
+            return None
+
+    # ---------- W1 核心记忆块（core block）注入通道 ----------
+    def _core_block_segment(self) -> str:
+        """宿主拉取式（复用 freshness-protocol 注入通道模式）：每轮 prefetch 组装时
+        GET /v1/core-block，text 拼进注入段（随宿主注入走 user message 尾部；
+        **禁入 system prompt**——前缀缓存铁律，引擎侧绝不强推）。
+
+        与 recall 段正交：recall=按查询的相关记忆（落差闸），core block=pinned/精选
+        的常驻条目级原文（不经查询、每轮恒定）。fail-open：引擎不可达/关闭 → 空串。
+        """
+        if not self._cfg.get("core_block"):
+            return ""
+        resp = self._get(f"/v1/core-block?budget_chars={int(self._cfg['core_block_budget_chars'])}")
+        text = (resp or {}).get("text") or ""
+        if not text.strip():
+            return ""
+        return f"<core-memory engine=memory-engine>\n{text}\n</core-memory>"
+
     # ---------- recall / prefetch ----------
+    def _gate_results(self, results: List[dict]) -> List[dict]:
+        """落差闸（用户 2026-09-16 拍板 A，替代比值闸+θ 双参数）：纯结构判断。
+
+        - 相邻分数最大落差 ≥ drop_gate → 注入落差点之上整群（相关带与噪声带天然分离）
+        - 无显著落差（全平/纯噪声）→ floor 兜底，噪声不再固定满 k 注入
+        - 注入条数 0..top_k 完全逐轮自适应；唯一参数为相对比值，跨库漂移免疫
+        - score 解析失败：放行原序（fail-open，不因闸门丢召回）
+        """
+        if not results:
+            return []
+        try:
+            ordered = sorted(results, key=lambda r: -float(r.get("score") or 0.0))
+        except (TypeError, ValueError):
+            return results
+        if len(ordered) <= 1:
+            return ordered
+        s = [float(r.get("score") or 0.0) for r in ordered]
+        drops = [(s[i] / s[i + 1] if s[i + 1] > 0 else 1.0, i) for i in range(len(s) - 1)]
+        max_drop, cut = max(drops)
+        if max_drop >= self._cfg["recall_drop_gate"]:
+            return ordered[:cut + 1]
+        return ordered[:max(1, int(self._cfg["recall_floor"]))]
+
     def _do_recall(self, query: str) -> tuple[str, int]:
         # caller="main"：与主 agent 同身份（引擎可见性闸下 main 全见；migration 行 owner≠provider）
         resp = self._post("/v1/recall", {"query": query, "bank": None,
@@ -122,6 +173,10 @@ class MemoryEngineProvider(MemoryProvider):
         if not resp:
             return "", 0
         results = resp.get("results") or []
+        gated = self._gate_results(results)
+        logger.debug("memory-engine recall gate: %d -> %d (query=%s)",
+                     len(results), len(gated), query[:40])
+        results = gated
         lines: List[str] = []
         used = 0
         cap = self._cfg["recall_max_chars"]
@@ -148,18 +203,20 @@ class MemoryEngineProvider(MemoryProvider):
             self._session_id = str(session_id).strip()
         if not self._cfg["auto_recall"] or self._shutting_down.is_set():
             self._record_recall_indicator(returned=False, count=0)
-            return ""
+            return self._core_block_segment()   # W1：core block 独立于 recall 开关（常驻区不经查询）
         if self._cfg["recall_sync"]:
             text, count = self._do_recall(query)
             self._record_recall_indicator(returned=bool(text), count=count)
-            return self._format_recall(text)
+            return "\n\n".join(x for x in (self._format_recall(text),
+                                           self._core_block_segment()) if x)
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=3.0)
         with self._prefetch_lock:
             result, count = self._prefetch_result, self._prefetch_count
             self._prefetch_result, self._prefetch_count = "", 0
         self._record_recall_indicator(returned=bool(result), count=count)
-        return self._format_recall(result)
+        return "\n\n".join(x for x in (self._format_recall(result),
+                                       self._core_block_segment()) if x)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if self._cfg["recall_sync"] or not self._cfg["auto_recall"]:
@@ -380,6 +437,7 @@ class MemoryEngineProvider(MemoryProvider):
             {"key": "auto_recall", "label": "每轮自动 recall 注入", "type": "bool", "value": self._cfg["auto_recall"]},
             {"key": "retain_every_n_turns", "label": "每 N 轮落库", "type": "int", "value": self._cfg["retain_every_n_turns"]},
             {"key": "recall_top_k", "label": "recall 条数", "type": "int", "value": self._cfg["recall_top_k"]},
+            {"key": "core_block", "label": "W1 核心记忆块常驻注入（宿主拉取式）", "type": "bool", "value": self._cfg["core_block"]},
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
