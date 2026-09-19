@@ -262,6 +262,16 @@ Two anti-marketing warnings. First, **those numbers are not comparable to our R@
 - [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL purge with fail-closed triple gates (same-day backup exists, batch exported to external disk, engine health four-true). Dry-run by default; deletion goes through the HTTP API only, never direct SQL.
 - Regression evidence files (`tests/last_smoke.json`, `tests/last_stage2.json`) are generated per run and kept out of version control; last full run: 38 checks, 0 failures, at 39k memories.
 
+## Operational evidence
+
+Governance claims above are snapshot-checkable against the live daemon — `curl -s localhost:8766/v1/lifecycle`, `/v1/consolidate`, `/v1/hard-queries` (no auth bypass, no curated screenshot). Snapshot taken **2026-09-19** on the ~39.2k-memory production store (daemon v0.5.0-w3); live values drift, the endpoints don't lie.
+
+| Loop | Current numbers (2026-09-19) | What they show |
+|---|---|---|
+| TTL six-state machine | candidate 8,084 · trial 26,949 · **active 0** · decaying 0 · archived 3,920 · retired 238; scanner thread alive, 600 s interval, last scan: 0 transitions | The promotion gate (≥3 recall hits + ≥60% adopt rate, 6-day window) has passed **zero** entries — trust is earned, not defaulted. Honest caveat: the store is 3 days past its bulk migration, so the 90-day decay paths have not yet had a chance to fire; that is reported, not hidden |
+| Audit chain | `changelog`: 74,283 rows over 55,992 subject memories — retain 55,989 · delete 17,096 · lifecycle 402 · update 312 · consolidate 224 · adopt 77 · feedback 75 · supersede 68 · reembed 40; 5 supersede version chains; 156,634 access events; WAL: 172 segments archived, 0 failed | Every delete and transition replays by `op`+`ts`; corrections form traversable chains (`GET /v1/memories/{id}/chain`), not erased edits |
+| Self-evolution, first rounds | Consolidation: 22 candidate clusters scanned → dry-run found 2 groups → apply merged 2, archived 3–4 stale members per run (ledger live at `GET /v1/consolidate`). Hard-query pool: 7 zero-hit recalls, each with reason. Parameter autotune: **0 committed mutations** — no mutant has passed the paired two-round ≥5% gate yet | The loops run, and the gates still refuse: proposals flow, parameters do not move without statistical evidence — which is the whole design point |
+
 ## License
 
 MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) for the test discipline (all-green pytest + zero-match grep audit are the merge bar).
