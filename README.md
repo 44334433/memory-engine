@@ -59,7 +59,7 @@ Single binary process, single database, no external services. The embedder is wa
 | **Four-route recall** | dense vector + PGroonga CJK full-text + temporal routing + one-hop graph pull-back, fused by weighted RRF | hybrid beats BM25 by +12.4pp (see Benchmark) |
 | **Auditable scoring** | every hit ships `score_parts` — per-route rank, freshness factor, staleness factor, tier weight | no black-box ranking |
 | **Bi-temporal memory** | `valid_at` / `invalid_at` on every entry; corrections *supersede* — old rows are never deleted | history is replayable |
-| **Write protection** | prompt-injection gate (external content scanned, `external_only` default) + exact-hash and semantic dedup (cos ≥ 0.97 vs last 30 days) + source-tier downweighting (web 0.85, cron 0.9) | poisoned input never becomes trusted memory |
+| **Write protection** | prompt-injection gate (external content scanned, `external_only` default) + exact-hash and per-bank semantic dedup (cos threshold per bank: knowledge 0.98 / hermes 0.95, unregistered banks fall back to the global default, env-appendable) + source-tier downweighting (web 0.85, cron 0.9) | poisoned input never becomes trusted memory; thresholds have one change point in config |
 | **Visibility model** | caller-scoped: `main` / per-agent / subagent see disjoint views; `private` entries invisible to non-owners | zero cross-host leakage |
 | **Graceful degradation** | embedder failure → explicit fts-only mode (200 + `degraded` + `failed_routes`), self-heal thread retries every 60 s and pulls vector recall back | degraded ≠ dead, and it says so |
 | **Typed memory** | every entry classified `semantic` / `procedural` / `episodic` at write time (heuristic classifier, backfill script included); decay half-lives differ per type (semantic ×2 slowest, episodic ×1 unchanged); `filters.memory_type` narrows all three routes | 37k entries backfilled; filtered recall runs faster than unfiltered |
@@ -85,12 +85,14 @@ POST /v1/feedback               host outcome signal: adopted / corrected /
                                 useless (EMA polarity, feeds decay + pool)   → polarity
 GET  /v1/memories               list/filter (bank, domain, state, time, as_of, type) → paginated
 GET  /v1/memories/{id}          single entry + full provenance
+GET  /v1/memories/{id}/chain    supersede-chain traversal (recursive CTE, max_hops, cycle guards)
+GET  /v1/graph                  read-only entity/edge graph
+GET  /v1/graph/neighbors        BFS neighbors (hops=1-2, as_of edge filter, entity bridges)
 PATCH /v1/memories/{id}         update fields (re-embeds when body changes);
                                 body+supersede=true starts a new version, pinned=true pins it
 POST /v1/memories/{id}/adopt    report host adoption (feeds use-it-or-lose-it)
 POST /v1/memories/{id}/attachments    image attachments (content-addressed, optional VLM caption)
 DELETE /v1/memories/{id}        retire (soft), `?purge=true` for hard delete
-GET  /v1/graph                  read-only entity/edge graph
 GET  /v1/export                 full JSONL export (logical backup)
 GET  /v1/health                 four-truth check: db + model + warm + ready
 ```
@@ -111,7 +113,7 @@ Two honesty notes: the self-tuning gate uses paired per-question testing (not ag
 
 ## Knowledge graph
 
-Beyond vectors and full-text, the schema carries an entity-relation layer (`entities` / `edges`, lightweight, no separate graph DB): memories are linked by extracted entities, and recall runs a fourth route over the graph — a one-hop pull-back catches the related memory that vector similarity missed. The graph is no longer a toy: LLM extraction ran over the full production corpus (**2,463 entities, ~8k semantic edges** on top of 3.5k co-occurrence edges, 2026-09-18), with typed relations (related / parent_child / causal / contradicts). The graph ships with a **zero-build visualization UI** (`deploy/graph.html` — single file, graphology + sigma.js v3 via CDN, served next to the daemon: filter by bank/domain, click a node for full memory provenance) and a read-only `GET /v1/graph` endpoint. Entity disambiguation, multi-hop traversal and supersede-chain queries are on the roadmap; if you want a full property graph engine with a browser, this is still not that tool.
+Beyond vectors and full-text, the schema carries an entity-relation layer (`entities` / `edges`, lightweight, no separate graph DB): memories are linked by extracted entities, and recall runs a fourth route over the graph — a one-hop pull-back catches the related memory that vector similarity missed. The graph is no longer a toy: LLM extraction ran over the full production corpus (**2,463 entities, ~8k semantic edges** on top of 3.5k co-occurrence edges, 2026-09-18), with typed relations (related / parent_child / causal / contradicts). The graph ships with a **zero-build visualization UI** (`deploy/graph.html` — single file, graphology + sigma.js v3 via CDN, served next to the daemon: filter by bank/domain, click a node for full memory provenance), a read-only `GET /v1/graph`, **supersede-chain traversal** (`GET /v1/memories/{id}/chain?max_hops=5` — recursive CTE over the version lineage with cycle guards and per-version time windows) and **two-hop neighbors** (`GET /v1/graph/neighbors?id=&hops=2&as_of=` — BFS with entity bridges and as-of edge filtering, both shipped 2026-09-19). Entity disambiguation is on the roadmap; if you want a full property graph engine with a browser, this is still not that tool.
 
 ## Quick Start
 
@@ -168,7 +170,7 @@ pytest tests/ -v
 }
 ```
 
-Writes are deduplicated (cosine ≥ 0.97 against the last 30 days, context required). Hosts keep a per-session read cursor; the next visit gets `POST /v1/freshness/digest` — bounded by budget, domain-scoped, same-key collapses to the net change. **No digest ≠ nothing happened; it means nothing you haven't already read.**
+Writes are deduplicated (semantic dedup with per-bank cosine thresholds — knowledge 0.98 / hermes 0.95 / default per config — against the last 30 days, context required). Hosts keep a per-session read cursor; the next visit gets `POST /v1/freshness/digest` — bounded by budget, domain-scoped, same-key collapses to the net change. **No digest ≠ nothing happened; it means nothing you haven't already read.**
 
 ## Benchmark
 
