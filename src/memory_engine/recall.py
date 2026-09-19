@@ -166,8 +166,25 @@ def _graph_seeds(*route_rows: list) -> list:
     return out
 
 
+def _tenant_forced_filters(filters: dict | None) -> dict | None:
+    """多租户预备层（2026-09-19 拍板变更：触发条件提前，用户显式拍板；DB 侧配套迁移 008_rls.sql）。
+
+    MULTI_TENANT=0（缺省）：原对象直接返回——零改动零拷贝，存量行为逐字节不变。
+    MULTI_TENANT=1：强制注入 filters.tenant_id=config.TENANT_ID（调用方显式传值优先）；
+      注意 NULL tenant 行过滤后不可见（既有 P1 二批语义「NULL 行仅无过滤时可见」），
+      启用前必须按 README「多租户三步」②回填存量 tenant_id，否则全库召回清空。
+    """
+    if not config.MULTI_TENANT:
+        return filters
+    f = dict(filters or {})
+    if not f.get("tenant_id"):
+        f["tenant_id"] = config.TENANT_ID
+    return f
+
+
 def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | None, caller: str | None,
            top_k: int, filters: dict | None, reranker: "Qwen3Reranker | None" = None) -> dict:
+    filters = _tenant_forced_filters(filters)   # 多租户强制过滤（关=原对象直通，零行为）
     t0 = time.perf_counter()
     # —— P1 降级批：嵌入路失败→登记后跳过矢量路，降级纯 FTS+时序路（宁降级不 503/不炸调用）——
     failed_routes: dict[str, str] = {}

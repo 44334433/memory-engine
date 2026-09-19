@@ -93,11 +93,22 @@ pytest tests/ -v
 
 ## 诚实的局限
 
-- **单机规模**。为一个 Agent 系统一个运维者设计（生产运行在约 4 万条记忆；无过滤最坏配置实测到 12.2 万条）。没有分片方案。需要多租户，今天这不是对的工具。
-- **双轨评测，有意为之**。公开 LongMemEval 集（500 题，`eval/lme/`，完全可复现）+ 36 条私有生产基线（含真实内容）——同类可复现、同数据集不可复现。参数变更双闸同过才固化。
+- **单机规模**。为一个 Agent 系统一个运维者设计（生产运行在约 4 万条记忆；无过滤最坏配置实测到 12.2 万条）。多租户**预备层**已落地（RLS 迁移 + `MULTI_TENANT` 开关，默认关=零行为）；真实第二宿主接入时按下方「启用三步」开启，配额/隐私边界仍属届时工作。
+- **双轨评测，有意为之**。公开 LongMemEval 集（500 题，`eval/lme/`，一键复现 `bash eval/lme/run_eval.sh`，`--dry-run` 可先看计划）+ 36 条私有生产基线（含真实内容）——同类可复现、同数据集不可复现。参数变更双闸同过才固化。
 - **中文优先的 FTS**。PGroonga 是中文召回的承重墙；纯英文部署可能想换别的 FTS 扩展。
 - **嵌入模型有立场**。Qwen3-Embedding-0.6B fp16 CUDA 是实测选型（见 docs/）；纯 CPU 主机能跑但延迟预算重算。
 - **uuid7 的 variant 位**尚未完全符合 RFC 9562（时间前缀语义已验证；issue 追踪中）。
+
+## 多租户（预备层）：启用三步
+
+隔离默认**关，且关态完全惰性**：`MULTI_TENANT=0` 时 recall 过滤器原样直通；RLS 策略对未设 `app.tenant_id` 的会话全量放行（daemon/CLI/迁移/备份一切如旧）。关态零行为有 `tests/test_multi_tenant_rls.py` 断言，DB 层语义在影子库实跑验证（未设租户全见 / `SET app.tenant_id='t1'` 只见 t1 / 跨租户写被 `WITH CHECK` 拒）。
+
+真实第二宿主接入时：①`python3 scripts/migrate.py --apply`（幂等）②回填归属
+`UPDATE memories SET tenant_id='default' WHERE tenant_id IS NULL;`（NULL 租户行在带过滤的召回下不可见）
+此后写入显式带 `tenant_id` ③部署侧设 `MEMORY_ENGINE_MULTI_TENANT=1` +
+`MEMORY_ENGINE_TENANT_ID=<本宿主租户>`；需要 DB 级纵深防御时由会话 `SET app.tenant_id`（连接池接线时收敛到
+`SET LOCAL` 事务作用域——预备层刻意不做）。
+
 
 ## 定位
 

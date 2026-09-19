@@ -77,7 +77,7 @@ Short ADR-style notes for the trade-offs reviewers ask about. Each: the call, wh
 | **Core-memory block** | `GET /v1/core-block` — pinned entries plus auto-selected (high-polarity, repeatedly-adopted semantic/procedural) rendered under a hard char budget, read with zero side effects | host pulls it per turn; default off, no system-prompt writes |
 | **Lifecycle TTL** | six-state machine (trial → active → … → retired → deleted): adoption extends life, 90 days of zero access decays | unused memory stops costing quality |
 | **Disaster recovery** | PG snapshots + timer, plus full logical export (`GET /v1/export`) | RTO measured at 2.5 s |
-| **Multi-host ready** | `tenant_id` / `agent_id` columns already in schema; isolation enforcement lands when a second host actually connects | schema now, enforcement on trigger |
+| **Multi-host ready** | `tenant_id` / `agent_id` columns + PG row-level-security migration (`scripts/migrations/008_rls.sql`, session pass-through when unset) + `MULTI_TENANT` recall filter — both default **off** | zero behavior change until a host opts in (enable in 3 steps below) |
 | **Embedder swap** | pluggable: local Qwen3 or any OpenAI-compatible endpoint, one config line | re-embedding versioned via `embed_ver` |
 | **Graph visualization** | zero-build single-file UI (`deploy/graph.html`, sigma.js WebGL) + read-only `GET /v1/graph` | 11k edges / 2.4k entities on the production corpus |
 | **Image attachments** | `POST /v1/memories/{id}/attachments` — content-addressed storage, optional VLM caption (degrades gracefully if unconfigured), caption embedded with the same text embedder | no images-in-vector yet by design (caption-mediated, Mem0-style) |
@@ -226,11 +226,28 @@ Three labels, so readers can tell design choices from debts: **[by-design]** = a
 |---|---|---|
 | S0 (today) | — | single host; P95 recall 21-31 ms at 6k entries (line: 200 ms) |
 | S1 replica-ready | need ≥2 daemon copies, or GPU contention on embedder startup | embedder served separately via the pluggable provider (already `openai_compat`-ready); decision-state (param snapshots, word lists) converges into PG with advisory-lock single-writer — 1.5-2.5 days |
-| S2 multi-host | a second host genuinely connects | `tenant_id`/`agent_id` columns exist already; add quota isolation + privacy boundary + recall filtering — 3-5 days |
+| S2 multi-host | a second host genuinely connects | prep layer shipped: `tenant_id`/`agent_id` columns, RLS migration, `MULTI_TENANT` recall filter (all default-off) — enable in 3 steps below; remaining: quota isolation + privacy boundary + per-session `app.tenant_id` wiring |
 | S3 asset-grade durability | the memory store becomes someone's production asset | PG streaming replication + remote standby (export JSONL already provides logical cross-version backup) — engine code unchanged |
 | S4 hosted service | explicit product decision | billing, tenant console, observability — a different product, not on this roadmap |
 
 What is deliberately *not* planned: migrating to a distributed vector DB (pgvector + HNSW stays 10 ms-class to millions of rows — a cluster buys nothing here) or splitting the daemon into microservices (the single binary is the point).
+
+## Multi-tenancy (prepared layer) — enable in three steps
+
+Isolation is **off by default and inert when off**: `MULTI_TENANT=0` passes recall filters through untouched, and the RLS policies pass through any session that hasn't set `app.tenant_id` (so the daemon, CLI, migrations, backups keep seeing everything). Verified with zero-behavior-change assertions in `tests/test_multi_tenant_rls.py` (app layer) and a live shadow-database run of `scripts/migrations/008_rls.sql` (DB layer: unset session sees all, `SET app.tenant_id='t1'` sees only t1, cross-tenant writes rejected by `WITH CHECK`).
+
+When a real second host connects:
+
+1. **Apply the migration** (idempotent, safe to run before switching anything):
+   ```bash
+   python3 scripts/migrate.py --apply        # dry-run by default; --apply executes
+   ```
+2. **Backfill ownership** — rows with `tenant_id IS NULL` become invisible to filtered recall once a tenant session is active (same semantics as the app-side filter since P1b):
+   ```sql
+   UPDATE memories SET tenant_id='default' WHERE tenant_id IS NULL;   -- entities/edges likewise, as needed
+   ```
+   From here on, every `POST /v1/retain` must pass `tenant_id` explicitly (the adapter passes it through).
+3. **Flip the switches per deployment**: env `MEMORY_ENGINE_MULTI_TENANT=1` + `MEMORY_ENGINE_TENANT_ID=<this host's tenant>` gives forced tenant filtering on every recall (explicit `filters.tenant_id` still wins). For DB-level defense-in-depth, have each app session `SET app.tenant_id='<tenant>'` (pool note: converge `SET` to transaction scope — `SET LOCAL` — when wiring the engine pool; deliberately not done in the prep layer).
 
 ## Positioning
 

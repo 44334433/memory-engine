@@ -291,4 +291,18 @@ RERANK_INSTRUCTION = os.environ.get(
     "Given a memory retrieval query, judge whether the memory record answers or supports the query",
 )
 
+# —— Multi-tenant readiness layer (2026-09-19 governance call moved the trigger forward:
+# build the prep layer now; enforcement activates per-host later). ★Single switch:
+# MEMORY_ENGINE_MULTI_TENANT defaults "0"=off.
+#   off  = recall() passes filters through untouched — zero behavior change, byte-identical
+#          (asserted in tests/test_multi_tenant_rls.py, including object identity).
+#   on   = recall force-injects filters.tenant_id=config.TENANT_ID (an explicit caller value wins).
+# DB-side counterpart = scripts/migrations/008_rls.sql: policies pass through any session that
+#   does not set app.tenant_id, so applying the migration with this switch off is doubly inert.
+# Enabling a real tenant = three steps in the README ("Multi-tenancy"): migrate → backfill
+#   tenant_id (NULL-tenant rows become invisible once filtered!) → set env + session app.tenant_id.
+# Writes are intentionally NOT auto-stamped with tenant_id here: retain must pass it explicitly.
+MULTI_TENANT = os.environ.get("MEMORY_ENGINE_MULTI_TENANT", "0").strip().lower() in ("1", "true", "yes", "on")
+TENANT_ID = os.environ.get("MEMORY_ENGINE_TENANT_ID", "default")
+
 VERSION = "0.5.0-w3"
