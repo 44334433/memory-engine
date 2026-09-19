@@ -10,6 +10,7 @@ import statistics
 import subprocess
 import sys
 import time
+import uuid
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("MEMORY_ENGINE_PORT", "8766"))
@@ -198,6 +199,58 @@ def main() -> int:
     p95_cb = lat_cb[int(len(lat_cb) * 0.95) - 1]
     RESULTS["core_block_p95"] = round(p95_cb, 1)
     check("core_block.p95_lt50ms", p95_cb < 50, f"p95={p95_cb:.1f}ms（验收线 50ms，环回含 HTTP 开销）")
+
+    # 4c) 图谱深度批（2026-09-19）：取代链多跳回放 + 2 跳邻居遍历（链就地构造，尾部 purge 零残留）
+    st, gc0 = req("POST", "/v1/retain", {"bank": "hermes", "caller": "main", "items": [
+        {"content": f"链深冒烟 v1 gdch7：端口配置 8080 {int(time.time())}",
+         "context": "图谱深度批冒烟（用后即删）", "domain": "smoke"}]})
+    g1 = (gc0.get("ids") or [""])[0]
+    CREATED_IDS.append(g1)
+    check("chain.retain_seed", st == 200 and bool(g1), f"{st} {gc0}")
+    gmid = g1
+    for i in (2, 3):
+        st, gp = req("PATCH", f"/v1/memories/{gmid}", {
+            "body": f"链深冒烟 v{i} gdch7：端口配置 {8080 + i * 1010}",
+            "supersede": True})
+        assert st == 200, gp
+        gmid = gp.get("id") or gmid
+        CREATED_IDS.append(gmid)
+    st, ch = req("GET", f"/v1/memories/{g1}/chain?max_hops=5")
+    vers = ch.get("versions", [])
+    check("chain.length3", st == 200 and ch.get("length") == 3
+          and vers and vers[0]["id"] == g1 and vers[-1]["is_current"] is True,
+          f"{st} {str(ch)[:200]}")
+    check("chain.windows_contiguous",
+          all(a["invalid_at"] == b["valid_at"] for a, b in zip(vers, vers[1:]))
+          and vers[-1]["invalid_at"] is None, str(vers[-2:] if vers else "")[:200])
+    st, ch_mid = req("GET", f"/v1/memories/{gmid}/chain")   # 链上任意 seed 双向回溯到同一全链
+    check("chain.seed_middle", st == 200 and ch_mid.get("length") == 3
+          and ch_mid.get("head") == g1 and ch_mid.get("tail") == gmid
+          and [v["hop_from_seed"] for v in ch_mid.get("versions", [])] == [-2, -1, 0],
+          f"{st} {str(ch_mid)[:200]}")
+    st, ch_cap = req("GET", f"/v1/memories/{g1}/chain?max_hops=1")
+    check("chain.max_hops_truncated", st == 200 and ch_cap.get("length") == 2
+          and ch_cap.get("truncated_forward") is True and ch_cap.get("truncated_back") is False,
+          f"{st} {str(ch_cap)[:150]}")
+    st, _c404 = req("GET", f"/v1/memories/{uuid.uuid4()}/chain")
+    check("chain.404", st == 404, str(st))
+    # 邻居：从全图快照挑真实边端点做种子（只读，取首个出结果的）；as_of 远古=空窗（边过滤语义）
+    st, gsnap = req("GET", "/v1/graph?limit=20")
+    seed_id, nb = None, {}
+    for cand in [e["source"] for e in gsnap.get("edges", [])][:8]:
+        st, nb = req("GET", f"/v1/graph/neighbors?id={cand}&hops=2")
+        if st == 200 and nb.get("nodes"):
+            seed_id = cand
+            break
+    nbs = nb.get("nodes", [])
+    check("neighbors.two_hop", bool(seed_id) and all(1 <= n["hop"] <= 2 for n in nbs)
+          and len({n["id"] for n in nbs}) == len(nbs),   # 防环：无重复节点
+          f"counts={nb.get('counts')}")
+    st, nb0 = req("GET", f"/v1/graph/neighbors?id={seed_id}&hops=2&as_of=2020-01-01T00:00:00Z")
+    check("neighbors.asof_empty_window", st == 200 and nb0.get("edges") == []
+          and bool(nb0.get("as_of")), f"{st} {str(nb0)[:150]}")
+    st, nb_404 = req("GET", f"/v1/graph/neighbors?id={uuid.uuid4()}")
+    check("neighbors.404", st == 404, str(st))
 
     # 5) DELETE（retired 语义）+ purge
     st, r = req("DELETE", f"/v1/memories/{mid}")
