@@ -52,6 +52,16 @@ We ran a framework in production and hit exactly that wall: compressed context d
 
 Single binary process, single database, no external services. The embedder is warm-resident; cold-start warmup is part of the health check (`/v1/health` asserts db + model + warm + ready, all four).
 
+## Architecture decisions
+
+Short ADR-style notes for the trade-offs reviewers ask about. Each: the call, why, what it costs, when it flips.
+
+- **AD-1: one PostgreSQL, five roles.** Vector (pgvector HNSW) + CJK full-text (PGroonga) + structured JSONB + bitemporal history + a light entity graph in one store — because one ACID snapshot *is* the backup, one query path *is* the audit, and cross-system sync bugs are a class we refuse to own. Cost: no horizontal write scaling. Flip condition: the S1–S3 ladder in ROADMAP (trigger-gated, not dated).
+- **AD-2: embedder resident in-process.** Warm CUDA residency (1.14 GB, 1024-dim) means retain/recall never pay a cold start or a network hop, and failure degrades inside one process lifecycle to explicit fts-only mode. Cost: the daemon wants GPU-class hardware (CPU works; latency budgets change). Flip condition: S1 — the pluggable provider (`openai_compat`) already makes extraction a config migration, not a rewrite.
+- **AD-3: HTTP is the only door.** Dedup, injection gate, and source-tier defaults live in the API, so consumers must not import around them — the single door is the enforcement point, which is why "no library bypass" is a test-enforced rule, not etiquette. Cost: one local hop (ms-level) plus a running daemon. Flip condition: none — that would delete the trust boundary.
+- **AD-4: weighted RRF over learned fusion.** Ranking must be explainable per hit (`score_parts` shows each route's contribution), so a bad ranking is a diagnosable fact, not an oracle question. Cost: fusion weights are hand-tuned — which is exactly what the autotune loop exists to challenge under a paired-gate. Flip condition: none planned; the reranker stage is additive and keeps the explainable scores visible.
+- **AD-5: supersede, never overwrite.** A correction inserts a new version and time-closes the old (`valid_at`/`invalid_at`); in-place edits of live content are 409-rejected. Cost: write amplification — 74,283 changelog rows across 55,992 subject memories against ~39k live rows (2026-09-19). Flip condition: none; physical removal only through the triple-gated purge.
+
 ## What's inside
 
 | Capability | How it works | Hard numbers |
