@@ -117,15 +117,28 @@ def retain(req: RetainRequest, request: Request, bg: BackgroundTasks):
             "error": "投毒闸：注入模式命中，拒绝入库",
             "scan_scope": config.INJECTION_SCAN_SCOPE, "items": flagged,
         })
-    vectors = eng.embedder.embed_documents([it.content for it in req.items])
-    ids, skipped, maxseq, dedup_existing = [], 0, 0, []
-    with pool_conn(eng) as conn:
-        for it, vec in zip(req.items, vectors):
-            ch = content_hash(req.bank, it.content)
-            if req.dedup:
+    # —— 零成本优化①（研究-提取失败游标与写入异步化 §2.3-C，2026-09-19 拍板）：
+    # hash 判重前置到嵌入之前——与库内全等的内容只付 0.7ms 索引点查即拒，
+    # 不再先付 GPU 嵌入成本（旧顺序 embed→judge，全等重复白嵌）。
+    hashes = [content_hash(req.bank, it.content) for it in req.items]
+    pre_skip: set[int] = set()
+    if req.dedup:
+        with pool_conn(eng) as conn:
+            for i, ch in enumerate(hashes):
                 if db.hash_dup_id(conn, req.bank, ch):
-                    skipped += 1
-                    continue
+                    pre_skip.add(i)
+    if pre_skip:
+        log.info("retain: hash 判重前置 %d/%d 条全等重复早退（免嵌入）bank=%s",
+                 len(pre_skip), len(req.items), req.bank)
+    todo_idx = [i for i in range(len(req.items)) if i not in pre_skip]
+    vectors = (eng.embedder.embed_documents([req.items[i].content for i in todo_idx])
+               if todo_idx else [])
+    ids, skipped, maxseq, dedup_existing = [], len(pre_skip), 0, []
+    with pool_conn(eng) as conn:
+        for i, vec in zip(todo_idx, vectors):
+            it = req.items[i]
+            ch = hashes[i]
+            if req.dedup:
                 dup_id, _sim = db.semantic_dup(conn, req.bank, vec_to_pg(vec),
                                                config.DEDUP_DAYS, config.dedup_cos_for(req.bank))
                 if dup_id:

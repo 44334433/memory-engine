@@ -128,25 +128,6 @@ def lifecycle_history(request: Request, limit: int = 50):
     return {"items": rows, "count": len(rows)}
 
 
-@router.get("/hard-queries")
-def hard_queries_list(request: Request, days: int = 7, limit: int = 100, reason: str = ""):
-    """L3 失败回流池查询（自进化#4，2026-09-19）：只读 hard_queries.jsonl，纯文件零 DB。"""
-    import time as _time
-    entries = hard_queries.read_all()
-    cutoff = _time.time() - max(1, days) * 86400
-    rows = [e for e in entries if float(e.get("ts_epoch", 0) or 0) >= cutoff]
-    if reason:
-        rows = [e for e in rows if e.get("reason") == reason]
-    rows.sort(key=lambda e: float(e.get("ts_epoch", 0) or 0), reverse=True)
-    return {"total_pool": len(entries), "filtered": len(rows), "items": rows[:max(1, limit)]}
-
-
-@router.get("/hard-queries/weekly")
-def hard_queries_weekly(request: Request, days: int = 28):
-    """L3 失败回流周视图（自进化#4，2026-09-19）：按 ISO 周聚合频次，纯文件零 DB。"""
-    return hard_queries.weekly_view(days=days)
-
-
 @router.post("/consolidate")
 def consolidate_submit(request: Request, body: ConsolidateRequest):
     eng = request.app.state.engine

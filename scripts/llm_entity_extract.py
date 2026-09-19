@@ -5,6 +5,10 @@
   与嵌入可插拔 openai_compat 同一套网关配置）；未配置 key → 显式报错退出（禁伪造产出）。
 - 成本控制：--batch-size 条/请求、--limit 单次运行上限、--bank 过滤、跳过已抽取记忆
   （edges.source='llm_extract' 已有边者），分批可中断续跑。
+- 缺口B修复（2026-09-19 拍板，研究-提取失败游标 §1.3）：LLM 成功但零产出（无边写出）
+  的记忆登记 engine_meta(key='extract_attempts') 并在此后选单中排除——防「永久落单」
+  记忆占满 seq DESC 头部窗口导致旧记忆饥饿 + 每轮重复烧 LLM。真失败（调用/解析炸）
+  不登记、保持可重试。
 - G15（S1 级盲审硬约束，observe-only，写死）：contradicts 边**只记录**进 edges 表，
   绝不触发 memories.invalid_at 置位、绝不 DELETE memories——升 enforce 前置 =
   金标边集 precision>=0.7 且 30 天抽检通过（见 config 注释 / db.insert_edge 注释 /
@@ -23,6 +27,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -31,6 +36,7 @@ from memory_engine import config, db  # noqa: E402
 import psycopg  # noqa: E402
 
 SOURCE = "llm_extract"
+ATTEMPTS_KEY = "extract_attempts"   # engine_meta 键：{memory_id: {"ts":..., "empty": true}}
 BODY_SNIPPET = 400   # 每条记忆正文截断（成本闸：tokens ≈ 0.6×字符，20 条/批 ≤ ~8k tokens）
 ENTITY_TYPES = db.ENTITY_TYPES
 EDGE_TYPES = db.EDGE_TYPES
@@ -78,15 +84,52 @@ def _parse_json(text: str) -> dict:
         return json.loads(m.group(0))
 
 
-def pick_memories(conn, limit: int, bank: str | None) -> list[dict]:
-    """待抽取记忆：现行 + 未 retired/archived，且尚无 llm_extract 边（续跑语义）。"""
-    rows = db.fetch_all(conn, """
+def load_attempts(conn) -> dict:
+    """attempt 登记表（缺口B修复，2026-09-19 拍板）：engine_meta(key='extract_attempts')。
+
+    值 = {memory_id: {"ts": iso, "empty": true}}，只登记「LLM 成功但判定无边」的记忆；
+    真失败（LLM 调用/解析炸）不登记、保持可重试。饥饿解除：此类记忆不再占据
+    seq DESC 头部窗口，旧记忆得以进入；且不再每轮重复烧 LLM 成本。
+    """
+    row = db.fetch_one(conn, "SELECT value FROM engine_meta WHERE key=%s", (ATTEMPTS_KEY,))
+    val = row["value"] if row else None
+    return dict(val) if isinstance(val, dict) else {}
+
+
+def save_attempts(conn, attempts: dict) -> None:
+    db.execute(conn,
+               "INSERT INTO engine_meta(key, value) VALUES (%s, %s::jsonb) "
+               "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+               (ATTEMPTS_KEY, json.dumps(attempts, ensure_ascii=False)))
+
+
+def mark_empty_attempts(attempts: dict, batch_ids: list[str], covered: set[str], ts: str) -> int:
+    """批后登记：本轮 LLM 成功但没为某记忆写出任何新 llm_extract 边的 → empty 标记。
+    （产出全被校验丢弃、0 提案、或提案全部撞已有边成 dup——均属「无边可抽」。）返回新增数。"""
+    n = 0
+    for mid in batch_ids:
+        if mid not in covered and mid not in attempts:
+            attempts[mid] = {"ts": ts, "empty": True}
+            n += 1
+    return n
+
+
+def pick_memories(conn, limit: int, bank: str | None,
+                  exclude_empty: list[str] | None = None) -> list[dict]:
+    """待抽取记忆：现行 + 未 retired/archived，且尚无 llm_extract 边（续跑语义），
+    并排除 attempt 登记表中 empty=true 者（缺口B：空输出记忆不再占据头部窗口）。"""
+    sql = """
         SELECT id, title, body, valid_at FROM memories m
         WHERE m.is_current AND m.ttl_state NOT IN ('archived', 'retired')
           AND (%s::text IS NULL OR m.bank = %s)
-          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src_mid = m.id AND e.source = %s)
-        ORDER BY m.seq DESC LIMIT %s""", (bank, bank, SOURCE, limit))
-    return rows
+          AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src_mid = m.id AND e.source = %s)"""
+    params: list = [bank, bank, SOURCE]
+    if exclude_empty:
+        sql += "\n          AND m.id::text <> ALL(%s::text[])"
+        params.append(exclude_empty)
+    sql += "\n        ORDER BY m.seq DESC LIMIT %s"
+    params.append(limit)
+    return db.fetch_all(conn, sql, tuple(params))
 
 
 def persist(conn, mems: list[dict], llm_out: dict, valid_at_map: dict) -> dict:
@@ -95,6 +138,7 @@ def persist(conn, mems: list[dict], llm_out: dict, valid_at_map: dict) -> dict:
     ent_type = {str(e.get("name", "")).strip().lower(): str(e.get("etype", "other"))
                 for e in llm_out.get("entities") or []}   # 同批实体类型映射（缺省 other）
     stats = {"entities": 0, "edges": 0, "edges_dup": 0, "dropped": 0, "by_etype": {}}
+    covered: set[str] = set()   # 写出过新边的 src 记忆（缺口B：有产出者不做 empty 登记）
     with conn.transaction():
         for ent in llm_out.get("entities") or []:
             try:
@@ -129,10 +173,12 @@ def persist(conn, mems: list[dict], llm_out: dict, valid_at_map: dict) -> dict:
                 if eid:
                     stats["edges"] += 1
                     stats["by_etype"][etype] = stats["by_etype"].get(etype, 0) + 1
+                    covered.add(src)
                 else:
                     stats["edges_dup"] += 1
             except Exception:
                 stats["dropped"] += 1
+    stats["covered_ids"] = sorted(covered)
     return stats
 
 
@@ -152,16 +198,20 @@ def main() -> int:
         return 2
 
     with psycopg.connect(config.PG_DSN, autocommit=True) as conn:
-        mems = pick_memories(conn, args.limit, args.bank)
+        attempts = load_attempts(conn)   # 缺口B：attempt 登记表（empty=不再重选）
+        empty_ids = sorted(k for k, v in attempts.items()
+                           if isinstance(v, dict) and v.get("empty"))
+        mems = pick_memories(conn, args.limit, args.bank, empty_ids)
         batches = [mems[i:i + args.batch_size] for i in range(0, len(mems), args.batch_size)]
         print(f"待抽取 {len(mems)} 条 → {len(batches)} 批（batch_size={args.batch_size}, "
-              f"model={model}, apply={args.apply}）")
+              f"model={model}, apply={args.apply}）；attempt 登记 {len(empty_ids)} 条空输出已排除")
         if not args.apply:
             for bi, b in enumerate(batches):
                 print(f"--- batch {bi}: ids={[str(m['id'])[:8] for m in b]}")
             return 0
 
         total = {"entities": 0, "edges": 0, "edges_dup": 0, "dropped": 0, "by_etype": {}}
+        ts_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for bi, batch in enumerate(batches):
             vat_map = {str(m["id"]): m["valid_at"] for m in batch}
             items = "\n".join(
@@ -172,16 +222,21 @@ def main() -> int:
             try:
                 out = _parse_json(_chat(base_url, api_key, model, prompt, config.LLM_EXTRACT_TIMEOUT))
             except (urllib.error.URLError, RuntimeError, ValueError, json.JSONDecodeError) as e:
-                print(f"batch {bi}: LLM 调用/解析失败，跳过该批（不写库）: {e}")
+                print(f"batch {bi}: LLM 调用/解析失败，跳过该批（不写库，attempt 不登记=可重试）: {e}")
                 continue
             stats = persist(conn, batch, out, vat_map)
+            covered = set(stats.pop("covered_ids", []))
+            batch_ids = [str(m["id"]) for m in batch]
+            marked = mark_empty_attempts(attempts, batch_ids, covered, ts_now)
+            if marked:
+                save_attempts(conn, attempts)   # 每批落盘：中断续跑时登记不丢
             for k in total:
                 if k == "by_etype":
                     for et, c in stats["by_etype"].items():
                         total["by_etype"][et] = total["by_etype"].get(et, 0) + c
                 else:
                     total[k] += stats[k]
-            print(f"batch {bi}: {json.dumps(stats, ensure_ascii=False)}")
+            print(f"batch {bi}: {json.dumps(stats, ensure_ascii=False)} 空输出登记 +{marked}")
         print(json.dumps({"total": total}, ensure_ascii=False, indent=2))
     return 0
 

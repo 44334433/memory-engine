@@ -9,7 +9,8 @@
 Qwen3 实现细节（保持原行为）：
 - last-token pooling + L2 归一（官方模型卡实现）
 - query 侧拼英文 instruction，document 侧不拼
-- 线程锁串行化 GPU 调用（FastAPI 同步端点跑线程池）
+- 线程锁串行化 GPU 调用（FastAPI 同步端点跑线程池）；锁按 chunk(EMBED_BATCH=16) 粒度
+  获取/释放——整批不再独占，读路径（recall 查询嵌入）排队上限=单 chunk（2026-09-19 拍板）
 - torchaudio stub：transformers 5.x Qwen3 模型链会 import torchaudio，
   本机 user-site torchaudio(cu130) 与 torch(cu132) 不匹配 → 进程内 stub 绕过（纯文本嵌入不受影响）
 """
@@ -18,6 +19,7 @@ import json
 import logging
 import threading
 import sys
+import time
 import types
 import urllib.request
 
@@ -106,39 +108,51 @@ class Qwen3EmbeddingProvider(EmbeddingProvider):
         log.info("embedder warmup done (%d rounds)", rounds)
 
     @torch.no_grad()
+    def _encode_chunk(self, chunk: list[str]) -> list[list[float]]:
+        """单 chunk（≤EMBED_BATCH）编码——锁作用域即此粒度（零成本优化②，见 _encode）。"""
+        batch = self.tokenizer(
+            chunk,
+            padding=True,
+            truncation=True,
+            max_length=config.EMBED_MAX_LEN,
+            return_tensors="pt",
+        ).to(self.model.device)
+        hidden = self.model(**batch).last_hidden_state
+        mask = batch["attention_mask"]
+        if bool((mask[:, -1].sum() == mask.shape[0])):  # left padding → 末 token 即句末
+            emb = hidden[:, -1]
+        else:
+            seq_len = mask.sum(dim=1) - 1
+            emb = hidden[torch.arange(hidden.size(0), device=hidden.device), seq_len]
+        emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+        return emb.float().cpu().tolist()
+
     def _encode(self, texts: list[str]) -> list[list[float]]:
+        """按 chunk 持锁：GPU 串行保证不变（单 chunk 内不并发触模型），但 chunk 之间放锁——
+        旧版整批一把锁（retain 20 条批量期间 recall 查询嵌入排队 ~153ms），
+        现读路径排队上限 = 单个在算 chunk（研究-提取失败游标 §2.1/§2.3-C，2026-09-19 拍板）。
+        模型 eval 态无状态，chunk 间交错安全；输出顺序仍按输入序拼接。
+        chunk 边界 sleep(0)：强制让出 GIL，防止释放-重获零窗口被同线程 barge 掉
+        （CPython 锁非 FIFO，实测竞争线程可被连续抢占整批——违背本优化初衷）。"""
         out: list[list[float]] = []
         bs = config.EMBED_BATCH
+        first = True
         for i in range(0, len(texts), bs):
-            chunk = texts[i : i + bs]
-            batch = self.tokenizer(
-                chunk,
-                padding=True,
-                truncation=True,
-                max_length=config.EMBED_MAX_LEN,
-                return_tensors="pt",
-            ).to(self.model.device)
-            hidden = self.model(**batch).last_hidden_state
-            mask = batch["attention_mask"]
-            if bool((mask[:, -1].sum() == mask.shape[0])):  # left padding → 末 token 即句末
-                emb = hidden[:, -1]
-            else:
-                seq_len = mask.sum(dim=1) - 1
-                emb = hidden[torch.arange(hidden.size(0), device=hidden.device), seq_len]
-            emb = torch.nn.functional.normalize(emb, p=2, dim=1)
-            out.extend(emb.float().cpu().tolist())
+            if not first:
+                time.sleep(0)
+            first = False
+            with self._lock:
+                out.extend(self._encode_chunk(texts[i : i + bs]))
         return out
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        with self._lock:
-            return self._encode(texts)
+        return self._encode(texts)
 
     def embed_queries(self, queries: list[str]) -> list[list[float]]:
         prefixed = [
             f"Instruct: {config.EMBED_QUERY_INSTRUCTION}\nQuery: {q}" for q in queries
         ]
-        with self._lock:
-            return self._encode(prefixed)
+        return self._encode(prefixed)
 
 
 class OpenAICompatProvider(EmbeddingProvider):

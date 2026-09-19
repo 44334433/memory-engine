@@ -104,32 +104,6 @@ def _analysis_marker() -> Path:
     return Path(config.AUTOTUNE_DIR) / ".last_hardq_analysis"
 
 
-def weekly_view(days: int = 28) -> dict:
-    """周视图（自进化#4 2026-09-19）：按 ISO 周聚合失败回流频次（供 GET /v1/hard-queries/weekly）。
-
-    纯文件实现零 DB；窗口=max(1, days) 天；返回按周倒序的聚合行。
-    """
-    entries = read_all()
-    cutoff = time.time() - max(1, days) * 86400
-    weeks: dict[str, dict] = {}
-    for e in entries:
-        if float(e.get("ts_epoch", 0) or 0) < cutoff:
-            continue
-        dt = datetime.fromtimestamp(float(e.get("ts_epoch", 0) or 0), tz=timezone.utc)
-        iso = dt.isocalendar()
-        wk = f"{iso.year}-W{iso.week:02d}"
-        w = weeks.setdefault(wk, {"hits": 0, "keys": set(), "callers": set(), "reasons": set()})
-        w["hits"] += 1
-        w["keys"].add(e["key"])
-        w["callers"].add(str(e.get("caller", ""))[:60])
-        w["reasons"].add(str(e.get("reason", ""))[:20])
-    out = {wk: {"hits": w["hits"], "unique_queries": len(w["keys"]),
-                "callers": sorted(x for x in w["callers"] if x),
-                "reasons": sorted(x for x in w["reasons"] if x)}
-           for wk, w in sorted(weeks.items(), reverse=True)}
-    return {"window_days": max(1, days), "weeks": out, "pool_total": len(entries)}
-
-
 def analyze_hard_queries(now: float | None = None, force: bool = False) -> dict:
     """周期分析：query 簇（跨≥2 天 且 命中≥PROPOSAL_MIN）→ 调参提案 JSON（幂等，已有不重产）。
 
