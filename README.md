@@ -198,11 +198,15 @@ Every doubling costs 2–3pp — a smooth asymptote, no cliff at 6k. The gap bet
 
 ## Honest limitations
 
-- **Single-host scale.** Designed for one agent system and one operator (running at ~40k memories; tested to 122k in the no-filter worst case below). No sharding story. If you need multi-tenant, this is the wrong tool *today*.
-- **Eval split, on purpose.** Two tracks: the public LongMemEval set (500 questions, `eval/lme/`, fully reproducible) and a 36-query private baseline containing real production content — reproducible in kind, not in dataset. Dual-gate: parameter changes must clear both before they stick.
-- **CJK-first FTS.** PGroonga is load-bearing for Chinese recall; English-only deployments may prefer to swap in a different FTS extension.
-- **One embedder opinionated.** Qwen3-Embedding-0.6B fp16 on CUDA was chosen after measurement (see `docs/`); CPU-only hosts work but latency budgets change.
-- **uuid7 variant bits** are not fully RFC 9562-conformant yet (time-prefix semantics verified; tracked in issues).
+Three labels, so readers can tell design choices from debts: **[by-design]** = a deliberate scope decision with a trigger condition for revisiting; **[planned]** = accepted gap with work queued; **[accepted-cost]** = a trade-off we keep because the alternative is worse.
+
+- **[by-design] Single-host scale.** Designed for one agent system and one operator (running at ~40k memories; tested to 122k in the no-filter worst case below). No sharding story. If you need multi-tenant, this is the wrong tool *today* — the schema carries `tenant_id`/`agent_id`, and the Scaling path below defines the triggers.
+- **[accepted-cost] Eval split.** Two tracks: the public LongMemEval set (500 questions, `eval/lme/`, fully reproducible) and a 36-query private baseline containing real production content — reproducible in kind, not in dataset. Dual-gate: parameter changes must clear both before they stick.
+- **[accepted-cost] CJK-first FTS.** PGroonga is load-bearing for Chinese recall; English-only deployments may prefer to swap in a different FTS extension.
+- **[by-design] One embedder opinionated.** Qwen3-Embedding-0.6B fp16 on CUDA was chosen after measurement (see `docs/`); swapping is supported (pluggable provider + `embed_ver` re-embedding), CPU-only hosts work but latency budgets change.
+- **[planned] uuid7 variant bits** are not fully RFC 9562-conformant yet (time-prefix semantics verified; tracked in issues).
+- **[planned] Manual safety rails.** Consolidation stops at drafts, deletion stays manual, core-memory block ships off by default — deliberate fail-closed choices; automation widens only after production evidence accumulates.
+- **[planned] Host-driven feedback.** The outcome loop learns only what the host reports; automatic inference from host behavior is the next step.
 
 ## Scaling path (what changes when single-host stops being enough)
 
