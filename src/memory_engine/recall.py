@@ -288,7 +288,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             "created_at": m["created_at"].isoformat() if m["created_at"] else None,
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })
-    scored.sort(key=lambda d: d["score"], reverse=True)
+    scored.sort(key=lambda d: (d["score"], d["updated_at"] or ""), reverse=True)   # RRF 同分 tie-break：updated_at 新者优先（外部反馈#2，2026-09-19）
     # —— W3 可插拔重排（RRF 融合+因子评分之后、top_k 截断之前）——
     # 关（reranker=None）=本段整体条件跳过，零张量零分配，存量行为逐字节不变。
     # 开=只对 top RERANK_TOP_N(20) 候选精排（#23 延迟预算）；乘法融合 final'=final×(floor+(1−floor)·p)，
@@ -303,7 +303,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
                 f = config.RERANK_FLOOR + (1.0 - config.RERANK_FLOOR) * p
                 d["score"] = round(d["score"] * f, 6)
                 d["score_parts"]["rerank"] = round(p, 6)   # P(yes) 透出（分数可解释契约）
-            scored.sort(key=lambda d: d["score"], reverse=True)
+            scored.sort(key=lambda d: (d["score"], d["updated_at"] or ""), reverse=True)   # 重排后同 tie-break
         except Exception as e:  # noqa: BLE001 —— 增强路失败显式登记降级，保留重排前顺序
             log.warning("rerank failed → keep pre-rerank order (degraded): %s", e)
             failed_routes["rerank"] = str(e)[:300]
