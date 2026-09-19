@@ -260,4 +260,35 @@ CORE_W_POLARITY = 0.5   # polarity 主权重（唯一含负反馈的信号，cor
 CORE_W_ADOPT = 0.3      # 采纳（宿主引用，强信号）
 CORE_W_ACCESS = 0.2     # 访问频次（recall_hit，弱信号，log 归一）
 
-VERSION = "0.4.0-p1c"
+# —— W3 可插拔重排（2026-09-19；0.122 无过滤最差例批评的正面解法：四路 RRF 下异构记忆「竞争」而非「甄别」）——
+# ★变更点（唯一开关入口）：MEMORY_ENGINE_RERANK_ENABLED 缺省 "0"=关；
+#   关=recall 重排段完全跳过（零开销，存量行为逐字节不变）；开=RRF 融合后、top-k 截断前 cross-encoder 精排。
+RERANK_ENABLED = os.environ.get("MEMORY_ENGINE_RERANK_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+# 模型目录默认挂嵌入模型同级（MEMORY_ENGINE_DIR 覆盖时自动跟随）。
+RERANK_MODEL_DIR = Path(os.environ.get(
+    "MEMORY_ENGINE_RERANK_MODEL_DIR", str(MODEL_DIR.parent / "qwen3-reranker-0.6b")))
+# 设备：auto=按 GPU 总量预算闸选（mem_get_info 真实空载余量 ≥ RERANK_GPU_MIN_FREE_MIB 才上卡，
+#   否则退 CPU 并 log）；可显式 cuda/cpu。禁擦线分配（09-19 双 OOM 实证）。
+RERANK_DEVICE = os.environ.get("MEMORY_ENGINE_RERANK_DEVICE", "auto")
+# GPU 预算（MiB）：模型 fp16 ~1250 + 批激活峰值 ~550 + 余量 ~760；embedder 1.14GB 常驻已
+# 体现在 free 口径（mem_get_info 读的是真实余量）。
+RERANK_GPU_MIN_FREE_MIB = int(os.environ.get("MEMORY_ENGINE_RERANK_GPU_MIN_FREE_MIB", "2560"))
+# 复杂度择优：只对 top N 精排（全量精排延迟翻倍无收益）。缺省 10=2026-09-19 A/B 实测
+# （10 候选×batch8 ≈110-130ms 达标；20 候选超延迟预算）；卡闲时可 env 调回 20。
+RERANK_TOP_N = int(os.environ.get("MEMORY_ENGINE_RERANK_TOP_N", "10"))
+# 单对 query+doc token 上限（记忆正文短于 1024）。
+RERANK_MAX_LEN = int(os.environ.get("MEMORY_ENGINE_RERANK_MAXLEN", "1024"))
+# 批大小上限=显存主变量（causal-LM lm_head 输出 B×L×151936 fp16；B=8 全 pad 到 1024 曾打爆
+# 12G 卡）；padding=longest + 下方每批 token 预算制打包后受控。
+RERANK_BATCH = int(os.environ.get("MEMORY_ENGINE_RERANK_BATCH", "8"))
+RERANK_BATCH_TOKEN_BUDGET = int(os.environ.get("MEMORY_ENGINE_RERANK_BATCH_TOKEN_BUDGET", "2048"))
+# 乘法融合 final' = final×(floor+(1−floor)·p)：P(yes) 作调制量而非主分，保 RRF 主序的序
+# 守恒性（floor=0.2 ⇒ 重排最多把一条记录的分数乘到 5×）。
+RERANK_FLOOR = float(os.environ.get("MEMORY_ENGINE_RERANK_FLOOR", "0.2"))
+# 官方模型卡指令头（Transformers 用法节逐字核对 09-19；改动=换校准）。
+RERANK_INSTRUCTION = os.environ.get(
+    "MEMORY_ENGINE_RERANK_INSTRUCTION",
+    "Given a memory retrieval query, judge whether the memory record answers or supports the query",
+)
+
+VERSION = "0.5.0-w3"
