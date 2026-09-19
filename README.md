@@ -245,6 +245,18 @@ What is deliberately *not* planned: migrating to a distributed vector DB (pgvect
 
 Built as a memory layer for [Hermes Agent](https://hermes-agent.nousresearch.com/docs), an open-source agent framework by Nous Research; the reference-and-callback idea for oversized tool outputs takes after [NeverFull compression proxy](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy) (design study — not yet wired in).
 
+## What's actually different
+
+The table above compares categories; this one names names — and the honest headline first: **no single mechanism here is unprecedented.** Hybrid retrieval exists in Mem0 and Zep, temporal validity exists in Zep, memory SDKs exist in LangMem; none of them ship LLM consolidation as refined a pipeline as Mem0/Zep do (ours deliberately stops at human-reviewed drafts). The defensible claim is the **combination** — lifecycle + freshness cursor + per-write audit + fail-closed deletion as one loop, in one daemon — and the failure behavior engineered as first-class.
+
+| System | Their strength, in their public numbers | Where this diverges |
+|---|---|---|
+| **Mem0** | LLM-extracted conversational memory, hosted + OSS; reports +26% relative accuracy vs OpenAI memory on LOCOMO, 91% lower p95 latency and >90% token savings vs full-context ([arXiv 2504.19413](https://arxiv.org/abs/2504.19413)) | Their product is the extraction pipeline; lifecycle and auditability are accessories. Inverted here: writes stay verbatim, state machines do the trusting, every mutation lands in the changelog |
+| **Zep** | Temporal knowledge graph (Graphiti) as a managed service; reports DMR 94.8% vs MemGPT 93.4%, and +15.2–18.5% LongMemEval accuracy over full-context baselines at ~90% lower latency ([arXiv 2501.13956](https://arxiv.org/abs/2501.13956)) | The closest neighbor on bi-temporal thinking — we agree time-validity is the core. They run a graph service; we keep a light graph inside the same single Postgres and add freshness cursors + fail-closed ops instead of a managed-service surface |
+| **LangMem** | In-process LangChain SDK: memory managers and prompt-optimizer loops; its docs publish no benchmark numbers as of 2026-09 | A library has no independent enforcement point — anything that can import can bypass. The daemon-at-127.0.0.1 is a trust boundary choice, not packaging laziness |
+
+Two anti-marketing warnings. First, **those numbers are not comparable to our R@5 0.652**: Mem0/Zep report end-to-end answer accuracy judged by an LLM; ours is retrieval-only scoring with no LLM in the loop — different yardsticks, deliberately not ranked against each other. Second, single-point moats here are thin on purpose: the bet is that for agent memory, the boring properties (what's still true, who changed what, deletion with receipts) compose into something none of the three ships together as its *core* loop — and if a competitor ever does, this comparison table should get uncomfortable to maintain.
+
 ## Maintenance tooling
 
 - [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL purge with fail-closed triple gates (same-day backup exists, batch exported to external disk, engine health four-true). Dry-run by default; deletion goes through the HTTP API only, never direct SQL.
