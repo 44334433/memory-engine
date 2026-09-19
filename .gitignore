@@ -1,19 +1,20 @@
-# ---- 数据与产物：绝不入库 ----
-models/
-backups/
-*.dump
-*.jsonl
-eval/compare_result.json
-tests/last_smoke.json
-tests/last_stage2.json
-purge_report/
-migration/
-state/
 
 # ---- 本地环境 ----
-.env
-.venv/
-__pycache__/
-*.pyc
+# ---- 数据与产物：绝不入库 ----
+backups/
+*.bak-*
+*.dump
 *.egg-info/
+.env
+eval/compare_result.json
+*.jsonl
+migration/
+models/
+purge_report/
+*.pyc
+__pycache__/
 .pytest_cache/
+state/
+tests/last_smoke.json
+tests/last_stage2.json
+.venv/
