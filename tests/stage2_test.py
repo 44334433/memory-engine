@@ -148,9 +148,14 @@ def main() -> int:
     check("changelog.admission_gate", any(d["detail"].get("reason") == "admission_gate" for d in cl),
           json.dumps([d["detail"] for d in cl], ensure_ascii=False)[:200])
 
-    # 7. 90d 无触发 → decaying（召回降权 0.7 见 recall.life_factor）；3d 内命中 → 复活
-    sql("UPDATE memories SET created_at = created_at - interval '91 days' WHERE id=%s", (c1,))
-    sql("UPDATE access_events SET ts = ts - interval '91 days' WHERE memory_id=%s", (c1,))
+    # 7. 无触发 → decaying（召回降权 0.7 见 recall.life_factor）；3d 内命中 → 复活
+    #    W4（2026-09-19）：窗口=ACTIVE_DECAY_DAYS×类型系数×bank scale（knowledge=1.5），
+    #    回拨量按条目实际 memory_type 现算（集中变更点=config，本脚本不另拍数字）。
+    c1_mt = http("GET", f"/v1/memories/{c1}").get("memory_type") or "episodic"
+    c1_win = lambda base: int(round(base * config.TYPE_DECAY_FACTORS.get(c1_mt, 1.0)
+                                    * config.decay_scale_for("knowledge")))
+    sql(f"UPDATE memories SET created_at = created_at - interval '{c1_win(config.ACTIVE_DECAY_DAYS) + 1} days' WHERE id=%s", (c1,))
+    sql(f"UPDATE access_events SET ts = ts - interval '{c1_win(config.ACTIVE_DECAY_DAYS) + 1} days' WHERE memory_id=%s", (c1,))
     run3 = http("POST", "/v1/lifecycle/run", {"dry_run": False})
     check("lifecycle.decay_90d", c1 in run3["transitions"]["active_to_decaying"]["ids"],
           str(run3["transitions"]["active_to_decaying"]))
@@ -161,10 +166,12 @@ def main() -> int:
     check("lifecycle.revive", c1 in run4["transitions"]["decaying_to_active"]["ids"],
           str(run4["transitions"]["decaying_to_active"]))
 
-    # 8. 180d 无信号 → archived（hidden 不删：行在、recall 不可见）
+    # 8. 归档视界无信号 → archived（hidden 不删：行在、recall 不可见）
     #    同轮 scan 内 active→decaying 后 decaying→archived 会连续触发，故两轮取并集断言
-    sql("UPDATE memories SET created_at = created_at - interval '181 days' WHERE id=%s", (c1,))
-    sql("UPDATE access_events SET ts = ts - interval '181 days' WHERE memory_id=%s", (c1,))
+    #    W4：回拨=绝对锚定 now()，取 max(decay 窗, archive 窗)+2（§7 的相对回拨一并覆盖）
+    d8 = max(c1_win(config.ACTIVE_DECAY_DAYS), c1_win(config.DECAY_ARCHIVE_DAYS)) + 2
+    sql(f"UPDATE memories SET created_at = now() - interval '{d8} days' WHERE id=%s", (c1,))
+    sql(f"UPDATE access_events SET ts = ts - interval '{d8} days' WHERE memory_id=%s", (c1,))
     runA = http("POST", "/v1/lifecycle/run", {"dry_run": False})
     runB = http("POST", "/v1/lifecycle/run", {"dry_run": False})
     archived_ids = (set(runA["transitions"]["decaying_to_archived"]["ids"])

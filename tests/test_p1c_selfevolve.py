@@ -90,9 +90,14 @@ def _reasons(pg, mid: str) -> list[str]:
         conn, "SELECT detail FROM changelog WHERE op='lifecycle' AND memory_id=%s", (mid,))]
 
 
-def test_l2_adopt_upgrade_and_zero_access_decay(pg):
+def test_l2_adopt_upgrade_and_zero_access_decay(pg, monkeypatch):
     """L2 用进废退双轨：adopted≤30d 强信号升级 decaying→active；
-    连续 90d 零访问（任意 kind 锚定）→ trial/active 提前 decaying；拍板参数不动。"""
+    连续 90d 零访问（任意 kind 锚定）→ trial/active 提前 decaying；拍板参数不动。
+
+    W4（2026-09-19）：镜像行落默认 bank=hermes，而 hermes 已登记 decay scale=1.5，
+    本用例断言的是「拍板基准窗（90d）」语义 → 显式钉住 scale 映射为空=回退 1.0；
+    bank 级 scale 的分化行为由 tests/test_w4_bank_thresholds.py 专测覆盖，此处不重复。"""
+    monkeypatch.setattr(config, "BANK_DECAY_SCALE", {})
     # —— 轨 1：adopted 信号升级 ——
     m_up = _seed(pg, "decaying", 200)          # decaying + adopted 10d 前 → 升级 active
     _event(pg, m_up, "adopted", 10)

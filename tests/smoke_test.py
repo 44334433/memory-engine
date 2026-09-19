@@ -252,6 +252,32 @@ def main() -> int:
     st, nb_404 = req("GET", f"/v1/graph/neighbors?id={uuid.uuid4()}")
     check("neighbors.404", st == 404, str(st))
 
+    # 4d) W4 bank 级自适应阈值（2026-09-19）：默认只登记 skip（旧 daemon 无 W4 代码=不伪绿不假红）；
+    #     MEMORY_ENGINE_W4_LIVE=1 时对 hermes(0.95)/knowledge(0.98) 跑同一内容对的判重分化 HTTP 实证
+    #     （X/Y 对与 cos=0.9722 实证登记 tests/test_w4_bank_thresholds.py，此处为端到端冒烟复核）。
+    if os.environ.get("MEMORY_ENGINE_W4_LIVE") == "1":
+        w4x = "W4演示甲（合成数据）：光伏板巡检SLAM项目的三轮验收在九月完成，整体通过；打光模组遗留两处轻微缺陷，计划下月闭环，需复拍一组数据。"
+        w4y = "W4演示乙（合成数据）：光伏板巡检SLAM项目九月通过三轮整体验收，打光模组遗留两处轻微缺陷待下月闭环，验证需再拍一批数据。"
+        tag = int(time.time() * 1000) % 10**9
+        w4_ids, w4_ok = [], True
+        for bank, expect_skip in (("hermes", True), ("knowledge", False)):
+            st, rx = req("POST", "/v1/retain", {"bank": bank, "caller": "main", "items": [
+                {"content": f"{w4x} 标记{tag}", "context": "W4 冒烟判重分化（用后即删）",
+                 "source_tier": "user", "domain": "smoke"}]})
+            w4_ok &= st == 200 and bool(rx.get("ids"))
+            w4_ids += rx.get("ids", [])
+            st, ry = req("POST", "/v1/retain", {"bank": bank, "caller": "main", "items": [
+                {"content": f"{w4y} 标记{tag}", "context": "W4 冒烟判重分化（用后即删）",
+                 "source_tier": "user", "domain": "smoke"}]})
+            w4_ok &= st == 200 and (bool(ry.get("dedup_skipped")) == expect_skip)
+            w4_ids += ry.get("ids", [])
+        for cid in w4_ids:
+            req("DELETE", f"/v1/memories/{cid}?purge=true")
+        check("w4.dedup_bank_differentiation", w4_ok, "hermes@0.95 skip vs knowledge@0.98 retain")
+    else:
+        RESULTS["w4"] = "skipped（daemon 未运行 W4 代码或未开 MEMORY_ENGINE_W4_LIVE；实证批见 test_w4_bank_thresholds.py）"
+        print("- w4 段 skip（登记 last_smoke.json，非失败）")
+
     # 5) DELETE（retired 语义）+ purge
     st, r = req("DELETE", f"/v1/memories/{mid}")
     check("delete.retired", st == 200 and r.get("state") == "retired", f"{r}")
