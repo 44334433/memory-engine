@@ -80,3 +80,24 @@ Each line names its trigger — items stay parked, not deleted, until one fires:
 Adding an item requires stating its trigger signal in the PR; an item without a falsifiable
 trigger is a wish, not a roadmap entry. Removing an item requires its premise to be dead —
 say which, in the commit message.
+
+## 6. Repo mirror & CI reality (honest baseline, 2026-09-19)
+
+The public repo is a desensitized mirror of the operator's production deployment:
+`config.py` and private paths are rsync-excluded by design, and that exclusion drifted —
+the W3 rerank block was missing from the public `config.py` while `app.py`/`recall.py`
+imported all ten `RERANK_*` constants (daemon would raise `AttributeError` at startup).
+Fixed in this batch; `.env.example` gained the switch, `VERSION` stamped `0.5.0-w3`.
+
+CI state, because a merge-gate claim without its current verdict is fiction:
+
+- The `test` job is red on the last three main-branch runs (all 2026-09-19) — it dies at
+  step 4, *building the PG18 + pgvector + PGroonga service image*, before lint or pytest.
+  Infrastructure/upstream-image issue; fix already triggered by this observation.
+- Lint baseline behind that gate: ~107 mechanical findings under the CI flags (mostly
+  `E702` semicolon-packed filter lines, `E501`, two `F401`/`F841`) — one no-behavior-change
+  sweep, gated by the full suite.
+- Once the image builds, the next gate was the startup crash above — now cleared
+  (`import memory_engine.app` verified).
+
+This section's own retirement condition: delete it on CI's first green run.
