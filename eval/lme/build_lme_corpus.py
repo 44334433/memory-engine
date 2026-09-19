@@ -10,15 +10,15 @@
 - query = entry['question']；指标对 k∈{1,3,5,10,30,50} 取 recall_any/recall_all/ndcg_any
 
 产出：
-  ~/.hermes/memory-engine/eval/lme/questions.jsonl  每题一行（含 turn_ids 供评测）
-  ~/.hermes/memory-engine/eval/lme/turns.jsonl      每个 user turn 一行（供灌库）
+  eval/lme/questions.jsonl  每题一行（含 turn_ids 供评测）
+  eval/lme/turns.jsonl      每个 user turn 一行（供灌库）——OUT_DIR 可经 LME_DIR 覆盖
 """
 import json
 import os
 import sys
 
-SRC = "/media/qq/Linux/HermesArchive/longmemeval/hf-cleaned/longmemeval_s_cleaned.json"
-OUT_DIR = os.path.expanduser("~/.hermes/memory-engine/eval/lme")
+SRC = os.environ.get("LME_SRC_JSON", os.path.expanduser("~/longmemeval/longmemeval_s_cleaned.json"))
+OUT_DIR = os.environ.get("LME_DIR", os.path.dirname(os.path.abspath(__file__)))  # run_eval.sh 可重定向（缺省=本目录，行为不变）
 os.makedirs(OUT_DIR, exist_ok=True)
 
 

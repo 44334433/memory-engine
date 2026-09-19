@@ -12,6 +12,7 @@ Full-retrieval evaluation on [LongMemEval](https://huggingface.co/datasets/xiaow
 | `qa_log.jsonl` | full per-question QA trace (question, retrieved ids, generated answer) |
 | `corpus_stats.json` / `flat_by_type.json` | corpus composition and per-question-type breakdown |
 | `build_lme_corpus.py` → `ingest_turns.py` → `eval_retrieval.py` / `eval_qa.py` | the reproduction pipeline, in run order |
+| `run_eval.sh` | one command for the whole chain above: docker compose PG → schema+migrations → engine → ingest → 500-question eval → R@5 (`--dry-run` to preview, `--with-qa` for the QA subset) |
 
 ## Honesty notes
 

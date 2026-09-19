@@ -19,9 +19,9 @@ import sys
 import time
 import urllib.request
 
-LME_DIR = os.path.expanduser("~/.hermes/memory-engine/eval/lme")
-REPO_SRC = "/media/qq/Linux/HermesArchive/longmemeval/LongMemEval/src/retrieval"
-ENGINE = "http://127.0.0.1:8767"
+LME_DIR = os.environ.get("LME_DIR", os.path.dirname(os.path.abspath(__file__)))  # run_eval.sh 可重定向（缺省=本目录，行为不变）
+REPO_SRC = os.environ.get("LME_SCORER_SRC", os.path.expanduser("~/LongMemEval/src/retrieval"))
+ENGINE = os.environ.get("LME_ENGINE", "http://127.0.0.1:8767")
 TOPK = 50
 KS = [1, 3, 5, 10, 30, 50]
 

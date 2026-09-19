@@ -15,9 +15,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-ENGINE = "http://127.0.0.1:8767"
-TURNS = os.path.expanduser("~/.hermes/memory-engine/eval/lme/turns.jsonl")
-PROGRESS = os.path.expanduser("~/.hermes/memory-engine/eval/lme/ingest_progress.json")
+LME_DIR = os.environ.get("LME_DIR", os.path.dirname(os.path.abspath(__file__)))  # run_eval.sh 可重定向（缺省=本目录，行为不变）
+ENGINE = os.environ.get("LME_ENGINE", "http://127.0.0.1:8767")
+TURNS = os.path.join(LME_DIR, "turns.jsonl")
+PROGRESS = os.path.join(LME_DIR, "ingest_progress.json")
 BATCH = 32
 
 DATE_RE = re.compile(r"(\d{4})/(\d{2})/(\d{2}).*?(\d{2}):(\d{2})")

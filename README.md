@@ -191,7 +191,7 @@ Evaluated on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 500-qu
 |---|---|---|
 | Recall@5 | **0.652** | 0.528 |
 
-The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6B) + PostgreSQL full-text (PGroonga) + temporal routing, fused with weighted RRF. **Full data & reproduction pipeline: [`eval/lme/`](eval/lme/README.md)** — per-question results, corpus, and scripts are committed.
+The +12.4pp gain comes from hybrid retrieval: dense vectors (Qwen3-Embedding-0.6B) + PostgreSQL full-text (PGroonga) + temporal routing, fused with weighted RRF. **Full data & reproduction pipeline: [`eval/lme/`](eval/lme/README.md)** — per-question results, corpus, and scripts are committed. **One command:** `bash eval/lme/run_eval.sh` (docker compose → PG → schema + migrations → engine → ingest → 500-question scoring → R@5; `--dry-run` prints the plan, `--with-qa` adds the self-judged QA subset).
 
 **Full-corpus honesty note**: with no filtering at all, retrieval over the full 122K-memory store (production memories merged with the entire benchmark corpus — maximal heterogeneity, the hardest configuration) scores R@5 0.122, against BM25's 0.179 under the identical condition. The scale decay curve below isolates the cause: heterogeneity, not size. Production deployments mitigate with time-windowed filtering, the freshness protocol, typed retrieval (`memory_type` filters), core-memory blocks for always-on entries, and pluggable reranking (Qwen3 cross-encoder stage, shipped 2026-09-19 behind `RERANK_ENABLED=false` — off until the A/B evidence says on).
 

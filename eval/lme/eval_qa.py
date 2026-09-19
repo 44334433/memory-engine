@@ -21,9 +21,9 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-LME_DIR = os.path.expanduser("~/.hermes/memory-engine/eval/lme")
-ENGINE = os.environ.get("ENGINE", "http://127.0.0.1:8767")
-LLM = os.environ.get("LLM", "http://127.0.0.1:8769/v1/chat/completions")
+LME_DIR = os.environ.get("LME_DIR", os.path.dirname(os.path.abspath(__file__)))  # run_eval.sh 可重定向（缺省=本目录）
+ENGINE = os.environ.get("LME_ENGINE", os.environ.get("ENGINE", "http://127.0.0.1:8767"))
+LLM = os.environ.get("LME_LLM", os.environ.get("LLM", "http://127.0.0.1:8769/v1/chat/completions"))
 N_SAMPLE = int(os.environ.get("LME_QA_N", "100"))
 RESUME = os.environ.get("LME_QA_RESUME", "") == "1"
 SEED = 42
@@ -113,7 +113,8 @@ def main() -> int:
         for f in (f"{LME_DIR}/qa_log.jsonl",):
             if os.path.exists(f):
                 os.remove(f)
-    data = json.load(open("/media/qq/Linux/HermesArchive/longmemeval/hf-cleaned/longmemeval_s_cleaned.json"))
+    data = json.load(open(os.environ.get("LME_SRC_JSON",
+                                         os.path.expanduser("~/longmemeval/longmemeval_s_cleaned.json"))))
     by_qid = {e["question_id"]: e for e in data}
 
     results = {"rag": [], "norag": []}
