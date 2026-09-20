@@ -8,6 +8,15 @@
 #   - The groonga Launchpad PPA is NOT usable: it ships no PG18 build for noble
 #     (apt-cache madison verified 2026-09-16 — earlier CI recipe used it and
 #     failed with exit 100 on `apt-get install postgresql-18-pgdg-pgroonga`).
+#   - Keyring path (fixed 2026-09-20): the keyring file lives under the
+#     packages.groonga.org/debian/ prefix — the /ubuntu/ path 404s (curl 22 was
+#     the CI run-31 build failure). Signature verified locally with gpgv:
+#     /debian/groonga-archive-keyring.gpg = RSA 624CF77434839225 "Groonga Key
+#     (Groonga Official Signing Key)" makes a Good signature on
+#     ubuntu/dists/noble/InRelease (the very Release apt must trust here).
+#     Production host runs the same repo (packages.groonga.org/ubuntu noble
+#     universe, postgresql-18-pgdg-pgroonga 4.0.8-1 installed via
+#     /etc/apt/trusted.gpg.d/groonga.gpg).
 FROM ubuntu:noble
 
 ENV DEBIAN_FRONTEND=noninteractive
