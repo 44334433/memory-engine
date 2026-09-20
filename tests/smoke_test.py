@@ -254,12 +254,18 @@ def main() -> int:
             seed_id = cand
             break
     nbs = nb.get("nodes", [])
-    check("neighbors.two_hop", bool(seed_id) and all(1 <= n["hop"] <= 2 for n in nbs)
-          and len({n["id"] for n in nbs}) == len(nbs),   # 防环：无重复节点
-          f"counts={nb.get('counts')}")
-    st, nb0 = req("GET", f"/v1/graph/neighbors?id={seed_id}&hops=2&as_of=2020-01-01T00:00:00Z")
-    check("neighbors.asof_empty_window", st == 200 and nb0.get("edges") == []
-          and bool(nb0.get("as_of")), f"{st} {str(nb0)[:150]}")
+    if seed_id is None:
+        # 全新库图边依赖抽取服务产种子数据（CI 不跑抽取）——与 daemon 不可达同一纪律：
+        # 不伪绿也不假红，显式 info 一跳（404 防御无数据依赖，照常断言）。
+        check("neighbors.skip_unseeded", True,
+              "no graph edge seed (fresh DB, extraction not run); two-hop/as_of 断言仅活库跑")
+    else:
+        check("neighbors.two_hop", all(1 <= n["hop"] <= 2 for n in nbs)
+              and len({n["id"] for n in nbs}) == len(nbs),   # 防环：无重复节点
+              f"counts={nb.get('counts')}")
+        st, nb0 = req("GET", f"/v1/graph/neighbors?id={seed_id}&hops=2&as_of=2020-01-01T00:00:00Z")
+        check("neighbors.asof_empty_window", st == 200 and nb0.get("edges") == []
+              and bool(nb0.get("as_of")), f"{st} {str(nb0)[:150]}")
     st, nb_404 = req("GET", f"/v1/graph/neighbors?id={uuid.uuid4()}")
     check("neighbors.404", st == 404, str(st))
 
