@@ -21,12 +21,14 @@ log = logging.getLogger("memory-engine.lifecycle")
 WAL_FILE_RE = re.compile(r"^[0-9A-F]{24}(\.[0-9A-F]{24}\.backup|\.partial)?$")
 STATES = ("candidate", "trial", "active", "decaying", "archived")
 
-# 各状态 ttl_expires_at 语义（active/archived 无到期概念）
+# 各状态 ttl_expires_at 语义（active/archived 无到期概念）。
+# ⑪TTL env 化（2026-09-20）：trial/decaying 的字面天数走 config（默认 30/180=现值零行为），
+# 与转移窗（TRIAL_DECAY_DAYS/DECAY_ARCHIVE_DAYS）同源，消除双处硬编码漂移。
 _EXPIRES_SQL = {
     "candidate": "now() + interval '{d} days'",
-    "trial": "now() + interval '30 days'",
+    "trial": "now() + interval '{t} days'",
     "active": "NULL",
-    "decaying": "now() + interval '180 days'",
+    "decaying": "now() + interval '{k} days'",
     "archived": "NULL",
 }
 
@@ -38,10 +40,13 @@ def _transact(conn, sql: str, params: tuple, frm: str, to: str, reason: str) -> 
         if not rows:
             return []
         ids = [r["id"] for r in rows]
+        exp = _EXPIRES_SQL[to].format(d=config.CANDIDATE_DAYS,
+                                      t=config.TRIAL_DECAY_DAYS,
+                                      k=config.DECAY_ARCHIVE_DAYS)
         db.execute(
             conn,
             f"UPDATE memories SET ttl_state=%s, updated_at=now(), "
-            f"ttl_expires_at={_EXPIRES_SQL[to].format(d=config.CANDIDATE_DAYS)} WHERE id = ANY(%s)",
+            f"ttl_expires_at={exp} WHERE id = ANY(%s)",
             (to, ids),
         )
         for mid in ids:

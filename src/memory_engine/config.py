@@ -69,9 +69,9 @@ BACKUP_KEEP_EXT_DAYS = 90
 
 # —— 生命周期状态机（阶段2；拍板④准入=触发≥3+采纳率≥60%；蓝图 §6）——
 CANDIDATE_DAYS = int(os.environ.get("MEMORY_ENGINE_CANDIDATE_DAYS", "6"))   # 候选期(天)→自动转 trial
-TRIAL_DECAY_DAYS = 30        # trial 30d 无信号 → decaying（蓝图）
-ACTIVE_DECAY_DAYS = 90       # active 90d 无触发/采纳 → decaying（阶段2 拍板）
-DECAY_ARCHIVE_DAYS = 180     # decaying 180d 无信号 → archived（蓝图；hidden 不删）
+TRIAL_DECAY_DAYS = int(os.environ.get("MEMORY_ENGINE_TTL_TRIAL_DAYS", "30"))  # trial→decaying 窗（默认=现值30）
+ACTIVE_DECAY_DAYS = int(os.environ.get("MEMORY_ENGINE_TTL_DECAY_DAYS", "90"))  # active→decaying 窗（默认=现值90）
+DECAY_ARCHIVE_DAYS = int(os.environ.get("MEMORY_ENGINE_TTL_ARCHIVE_DAYS", "180"))  # →archived 窗（默认=现值180）
 REVIVE_WINDOW_DAYS = 3       # decaying 近 3d 有命中/采纳 → 复活 active（蓝图）
 PROMOTE_MIN_HITS = 3         # 近 30d recall_hit ≥3
 PROMOTE_MIN_ADOPT_RATE = 0.6  # 采纳率 adopted/hit ≥60%
