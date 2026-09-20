@@ -27,7 +27,7 @@
 
 我们在生产环境用框架时撞的正是这堵墙：压缩破坏了溯源、过期记忆作为「现状」复活、且没有任何机械手段验证「说了 vs 做了」。memory-engine 就是修复本身，抽出并硬化：
 
-- **三路混合召回**——稠密向量（pgvector HNSW）+ 中文优化全文（PGroonga）+ 结构化过滤，RRF 融合。每条命中携带 `score_parts`，排序为什么靠前可以审计。
+- **三路混合召回**——稠密向量（pgvector HNSW）+ 中文优化全文（PGroonga）+ 结构化过滤，RRF 融合。每条命中携带 `score_parts`，排序为什么靠前可以审计；字段集本身带版本（`schema_version`），下游可按版本防御性解析。
 - **生命周期，而非垃圾场**——每条记忆有 TTL 状态机（`active` → `aged` → `archived` → `retired` → purge），且 purge 管线 fail-closed：当日备份验证+批次异盘导出+健康检查，三者全真才准删，缺一不动。
 - **新鲜度协议**——宿主为每个会话记录「版本游标」。会话回来时，引擎把「你上次读取之后的变更」diff 成有预算上限、按域折叠的摘要。离开一周？你拿到的恰好是变了什么，而不是消防水管。
 - **查询时新鲜度闸**——日期分桶衰减（fresh / aging / stale）+已知过期关键词扫描+配置迁移后的内容-现实一致性校验。查重防重复；新鲜度闸防「复活」。
@@ -79,12 +79,18 @@ pytest tests/ -v
 
 ```jsonc
 // POST /v1/recall —— 每个答案自带溯源与新鲜度
+// （2026-09-20 从 3.9 万条在线实机响应裁剪）
 {
-  "hits": [{
-    "id": "m_01J9…",
-    "body": "…",
-    "score_parts": {"dense": 0.41, "fts": 0.22, "struct": 0.10},  // 可审计的排序依据
-    "freshness": {"bucket": "aging", "age_days": 47, "last_verified": "2026-09-10"}
+  "results": [{
+    "id": "01a0bc1e-8641-…",
+    "title": "…", "body": "…",
+    "score": 0.014631,
+    "score_parts": {                        // 可审计的排序依据；schema_version 守护字段集
+      "schema_version": 1, "rrf": 0.016393, "pri": 1.05, "life": 0.85,
+      "stale": 1.0, "tier_weight": 1.0, "graph": 0.0,
+      "outcome": null, "polarity": null, "routes": {"vector": 1}
+    },
+    "ttl_state": "candidate", "staleness": "fresh", "memory_type": "episodic"
   }]
 }
 ```

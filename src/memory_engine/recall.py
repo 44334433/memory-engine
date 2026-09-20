@@ -287,6 +287,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
         scored.append({
             "id": str(mid), "score": round(final, 6),
             "score_parts": {
+                "schema_version": 1,   # score_parts 结构版本：键增删改名时 +1，下游按此解析
                 "rrf": round(entry["rrf"], 6), "pri": round(pri, 4),
                 "life": round(life, 4), "stale": stale,
                 "tier_weight": round(tier_w, 4),

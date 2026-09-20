@@ -27,7 +27,7 @@ Existing options fall into two camps, and we needed a third:
 
 We ran a framework in production and hit exactly that wall: compressed context destroyed provenance, stale memories resurfaced as current facts, and there was no mechanical way to verify "said vs. done". memory-engine is the fix, extracted and hardened:
 
-- **Three-way hybrid retrieval** — dense (pgvector HNSW) + Chinese-optimized full-text (PGroonga) + structured filters, fused with RRF. Every hit ships `score_parts` so you can audit *why* it ranked.
+- **Three-way hybrid retrieval** — dense (pgvector HNSW) + Chinese-optimized full-text (PGroonga) + structured filters, fused with RRF. Every hit ships `score_parts` so you can audit *why* it ranked — the field set itself is versioned (`schema_version`) so consumers can parse defensively.
 - **Lifecycle, not landfill** — every memory has a TTL state (`active` → `aged` → `archived` → `retired` → purge), with a fail-closed purge pipeline (daily backup verified + batch exported off-device + health check = all true, or nothing is deleted).
 - **Freshness protocol** — the host records a *version cursor* per session. When it comes back, the engine diffs "changes since your last read" into a bounded, domain-scoped digest. Miss a week? You get exactly what changed, not a firehose.
 - **Staleness gate at query time** — date-bucketed decay (fresh / aging / stale), known-outdated keyword scanning, and content-vs-reality consistency checks after config migrations. Dedup prevents repeats; the staleness gate prevents *resurrection*.
@@ -87,7 +87,7 @@ Short ADR-style notes for the trade-offs reviewers ask about. Each: the call, wh
 
 ```
 POST /v1/retain                 write (dedup + injection scan + tiering)     → ids, dedup_skipped
-POST /v1/recall                 four-route hybrid search                     → results + score_parts + routes
+POST /v1/recall                 four-route hybrid search                     → results + score_parts (schema_version: 1) + routes
                                  filters: memory_type / as_of / date_range /
                                  staleness / tags / tenant_id / agent_id
 POST /v1/freshness/digest       what changed since my last cursor            → budgeted, domain-scoped
@@ -171,12 +171,18 @@ pytest tests/ -v
 
 ```jsonc
 // POST /v1/recall  — every answer carries provenance and freshness
+// (trimmed from a live capture, 39k-entry daemon, 2026-09-20)
 {
-  "hits": [{
-    "id": "m_01J9…",
-    "body": "…",
-    "score_parts": {"dense": 0.41, "fts": 0.22, "struct": 0.10},  // auditable ranking
-    "freshness": {"bucket": "aging", "age_days": 47, "last_verified": "2026-09-10"}
+  "results": [{
+    "id": "01a0bc1e-8641-…",
+    "title": "…", "body": "…",
+    "score": 0.014631,
+    "score_parts": {                        // auditable ranking; schema_version guards the field set
+      "schema_version": 1, "rrf": 0.016393, "pri": 1.05, "life": 0.85,
+      "stale": 1.0, "tier_weight": 1.0, "graph": 0.0,
+      "outcome": null, "polarity": null, "routes": {"vector": 1}
+    },
+    "ttl_state": "candidate", "staleness": "fresh", "memory_type": "episodic"
   }]
 }
 ```

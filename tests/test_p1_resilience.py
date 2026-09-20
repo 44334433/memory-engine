@@ -66,6 +66,7 @@ def test_embed_failure_degrades_to_fts_only(monkeypatch):
     ids = {r["id"] for r in res["results"]}
     assert {"m-1", "m-2", "m-3"} <= ids
     assert res["results"][0]["score_parts"]["tier_weight"] == 1.0
+    assert res["results"][0]["score_parts"]["schema_version"] == 1   # 结构版本随每份结果透出
 
 
 def test_embed_and_all_routes_failure_still_503(monkeypatch):
