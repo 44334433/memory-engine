@@ -167,6 +167,18 @@ def main() -> int:
     rec = http("POST", "/v1/recall", {"query": q, "bank": "knowledge", "caller": "stage2-test"})
     hit = next((r for r in rec["results"] if r["id"] == c1), None)
     check("recall.decaying_reachable", hit is not None, "decaying 条目仍可召回(降权)")
+    # recall_hit 事件走 FastAPI BackgroundTasks 异步落库（api_core._record_hits）——run4 紧跟着
+    # 扫库存在竞态：CI 冷 daemon 下刷新滞后 → 复活窗内无事件 → lifecycle.revive 假红。
+    # 等待事件可见（≤10s）再触发；超时则显式失败暴露“后台写没发生”，不伪绿。
+    flushed = False
+    for _ in range(100):
+        flushed = bool(sql("SELECT 1 FROM access_events WHERE memory_id=%s "
+                           "AND kind='recall_hit' AND ts > now() - interval '2 minutes' "
+                           "LIMIT 1", (c1,)))
+        if flushed:
+            break
+        time.sleep(0.1)
+    check("lifecycle.hits_flushed", flushed, "BackgroundTasks 落库竞态防护（revive 前置条件）")
     run4 = http("POST", "/v1/lifecycle/run", {"dry_run": False})
     check("lifecycle.revive", c1 in run4["transitions"]["decaying_to_active"]["ids"],
           str(run4["transitions"]["decaying_to_active"]))
