@@ -345,6 +345,8 @@ Two anti-marketing warnings. First, **those numbers are not comparable to our R@
 
 ## Operational evidence
 
+**What "production" means here, precisely.** This daemon is the live memory layer of the author's own Hermes Agent deployment: in continuous service since 2026-09-16 (restarts for upgrades included), 39,221 current memories, ≈160k access events from 9 distinct callers (primary agent `main` at 159.8k, plus CLI, doc-indexer, auto-outcome reporter), and the outcome loop live — 28 entries carry host-feedback polarity as of 2026-09-20, with `auto_outcome` inference switched on host-side. What it does **not** mean: multi-tenant SaaS traffic, external users, or third-party longitudinal validation. All 39,221 rows have `tenant_id` NULL — single-host wiring is the measured fact (enforcement is pre-staged in the RLS layer, waiting for a second host that does not exist yet). The claim buys exactly one thing: the failure modes documented in code comments — degraded boot killed into a systemd restart loop, GPU-lock starvation, silent permanent degradation — came from real traffic, not constructed demos; they were fixed in `a6a5d54`, `00ebcd8`, `21f6ca8` respectively.
+
 Governance claims above are snapshot-checkable against the live daemon — `curl -s localhost:8766/v1/lifecycle`, `/v1/consolidate`, `/v1/hard-queries` (no auth bypass, no curated screenshot). Snapshot taken **2026-09-19** on the ~39.2k-memory production store (daemon v0.5.0-w3); live values drift, the endpoints don't lie.
 
 | Loop | Current numbers (2026-09-19) | What they show |
