@@ -15,7 +15,7 @@ All notable changes, newest first. Three rules keep this honest:
 - feat(multitenant): RLS prep layer — `008_rls.sql` policies on memories/entities/edges, `MULTI_TENANT` default-off = passthrough (zero behavior), proven against a shadow database (`4468949`)
 - feat(integrations): LangChain adapter — `BaseMemory` + `BaseRetriever` over HTTP to the daemon, 11 hermetic mock-HTTP tests (`930a226`)
 - feat(eval): `run_eval.sh` — one command from compose to 500-question R@5, `--dry-run` prints the plan (`f2f06df`)
-- feat(recall): `score_parts` carries `schema_version: 1` — the auditable-scoring field set becomes structurally versioned, consumers parse defensively
+- feat(recall): `score_parts` carries `schema_version: 1` — the auditable-scoring field set becomes structurally versioned, consumers parse defensively (public `d251a1d`, prod `34932d9`)
 - docs: this CHANGELOG introduced; unrendered `<you>` clone-URL placeholders replaced with the real repo URL (`a4d5357`); README gains Evaluation methodology, a five-minute demo, and four honest answers (what "production-proven" means / where the 6k bottleneck actually is / deletion-gate behavior / CJK-vs-English impact)
 
 ## v0.5.0 — 2026-09-19 (tag; covers the 09-17→09-19 batch run: W1–W4 + outcome feedback + graph depth + as-of + RRF tie-break)
