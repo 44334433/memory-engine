@@ -5,12 +5,14 @@
 运行：/usr/bin/python3.12 -m pytest tests/test_outcome_feedback.py -v（memory-engine-ops：必须 3.12）。
 """
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8766"
+BASE = f"http://127.0.0.1:{int(os.environ.get('MEMORY_ENGINE_PORT', '8766'))}"  # 默认=现值；env 覆盖供隔离实例（2026-09-20）
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
@@ -35,7 +37,9 @@ def _retain(content: str, context: str) -> str:
                                  {"Content-Type": "application/json"})
     r = urllib.request.urlopen(req, timeout=15)
     d = json.load(r)
-    return d["ids"][0] if d.get("ids") else d["items"][0]["id"]
+    if d.get("ids"):
+        return d["ids"][0]
+    raise AssertionError(f"retain 未落库（完全同文被判重吞掉？）: {d}")
 
 
 def test_01_invalid_outcome_400():
@@ -64,7 +68,7 @@ def test_03_ema_semantics_unit():
 
 
 def test_04_feedback_adopted_lifecycle():
-    mid = _retain(f"outcome-e2e adopted 用例 {id(object())}", "test outcome e2e adopted")
+    mid = _retain(f"outcome-e2e adopted 用例 {uuid.uuid4().hex}", "test outcome e2e adopted")
     st, d = _post({"memory_id": mid, "outcome": "adopted", "caller": "pytest"})
     assert st == 200, f"adopted 应 200，得 {st}: {d}"
     assert 0 < d.get("polarity", 0) <= 1.0, f"polarity 应落 (0,1]，得 {d}"
@@ -72,7 +76,7 @@ def test_04_feedback_adopted_lifecycle():
 
 
 def test_05_feedback_useless_then_corrected_converge_negative():
-    mid = _retain(f"outcome-e2e negative 用例 {id(object())}", "test outcome e2e neg")
+    mid = _retain(f"outcome-e2e negative 用例 {uuid.uuid4().hex}", "test outcome e2e neg")
     st1, d1 = _post({"memory_id": mid, "outcome": "useless", "caller": "pytest"})
     assert st1 == 200 and d1["polarity"] < 0
     st2, d2 = _post({"memory_id": mid, "outcome": "corrected", "caller": "pytest"})
