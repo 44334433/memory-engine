@@ -35,6 +35,10 @@ flake8 src tests sdk/python --max-line-length=120 --extend-ignore=E203
 ```
 
 - Unit tests (`tests/test_unit_pure.py`, SDK tests) run offline.
+- This public tree is a curated mirror of the private production repo; upstream sync goes
+  through `scripts/sync_public.sh` (rsync + `import memory_engine.app` smoke gate — a failed
+  smoke rolls the sync back and nothing is pushed). Contributions still land here normally
+  via issues/PRs.
 - Integration suites (smoke / stage2) need a live daemon + database; they **auto-skip** when
   the daemon is unreachable rather than faking green. Run directly with
   `python3 tests/smoke_test.py` / `python3 tests/stage2_test.py`.
