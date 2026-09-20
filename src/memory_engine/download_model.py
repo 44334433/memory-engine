@@ -12,7 +12,7 @@ os.environ.pop("HF_HUB_OFFLINE", None)
 
 from huggingface_hub import snapshot_download  # noqa: E402
 
-from . import config
+from . import config  # noqa: E402  (hub env flags must precede huggingface_hub import)
 
 PATTERNS = [
     "config.json", "generation_config.json", "model.safetensors",
