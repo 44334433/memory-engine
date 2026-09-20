@@ -21,6 +21,7 @@ from .api_graph import router as graph_router               # P0 附件批：图
 from .api_graph_depth import router as graph_depth_router   # 图谱深度批（09-19）：取代链多跳+浅跳邻居
 from .api_feedback import router as feedback_router         # 自进化#1（2026-09-18）：POST /v1/feedback
 from .api_core_block import router as core_block_router     # W1（2026-09-18）：GET /v1/core-block
+from .api_metrics import router as metrics_router           # 借鉴增强四项（2026-09-20）：GET /v1/metrics（纯读观测面）
 from .db import PgPool
 from .embedder import EmbeddingProvider, build_embedder
 from .reranker import Qwen3Reranker, build_reranker  # W3 可插拔重排（开关关=build_reranker()→None，不加载模型）
@@ -44,6 +45,7 @@ class Engine:
         self.warm = False
         self.model_loaded = False
         self.started_at = time.time()
+        self.core_block_last_fetch: float | None = None   # P4 观测：最近一次 GET /v1/core-block 时刻（纯内存，读取零 DB 副作用铁律不破；重启归零）
         self.lifecycle_last: dict | None = None
         self.lifecycle_thread: threading.Thread | None = None
 
@@ -211,5 +213,6 @@ def create_app() -> FastAPI:
     app.include_router(attachments_router)
     app.include_router(feedback_router)   # 自进化#1：POST /v1/feedback（新路由零改动既有端点）
     app.include_router(core_block_router)  # W1：GET /v1/core-block（新路由零改动既有端点）
+    app.include_router(metrics_router)     # 借鉴增强：GET /v1/metrics（新路由零改动既有端点，纯读观测）
     app.include_router(graph_depth_router)  # 图谱深度批：/v1/memories/{id}/chain + /v1/graph/neighbors
     return app

@@ -243,3 +243,76 @@ def test_token_budget_packing(monkeypatch):
     #   批1: 14×4=56≤256，第5条使 max=64×5=320>256 → n=4；批2: 64×2=128≤256 → n=2
     assert sum(batches) == len(docs) and all(1 <= b <= config.RERANK_BATCH for b in batches)
     assert batches == [4, 2], f"预算制打包应短条并批、长条压批大小：期望 [4,2] 实际 {batches}"
+
+
+# ---------- ⑤ 合同测试（P5 残项补写 2026-09-20，参照 test_w1/test_w2 形态） ----------
+# S1 护栏「解析出厂配置合同测试钉死默认态」+ 活体端点形状合同（daemon 不可达 skip 不伪绿）。
+
+import importlib  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+import pytest  # noqa: E402
+
+_RERANK_ENV_KEYS = (
+    "MEMORY_ENGINE_RERANK_ENABLED", "MEMORY_ENGINE_RERANK_MODEL_DIR",
+    "MEMORY_ENGINE_RERANK_DEVICE", "MEMORY_ENGINE_RERANK_GPU_MIN_FREE_MIB",
+    "MEMORY_ENGINE_RERANK_TOP_N", "MEMORY_ENGINE_RERANK_MAXLEN",
+    "MEMORY_ENGINE_RERANK_BATCH", "MEMORY_ENGINE_RERANK_BATCH_TOKEN_BUDGET",
+    "MEMORY_ENGINE_RERANK_FLOOR", "MEMORY_ENGINE_RERANK_INSTRUCTION",
+)
+
+
+def test_contract_factory_ship_config():
+    """S1 出厂配置合同：env 全不设时重排默认态逐值钉死（改默认=故意行为，须过本闸）。"""
+    saved = {k: os.environ.pop(k, None) for k in _RERANK_ENV_KEYS}
+    try:
+        importlib.reload(config)
+        assert config.RERANK_ENABLED is False, "默认必须 off（SLM 先验未塑形不开启的护栏）"
+        assert config.RERANK_DEVICE == "auto"
+        assert config.RERANK_TOP_N == 10
+        assert config.RERANK_MAX_LEN == 1024
+        assert config.RERANK_BATCH == 8
+        assert config.RERANK_BATCH_TOKEN_BUDGET == 2048
+        assert config.RERANK_FLOOR == 0.2
+        assert config.RERANK_GPU_MIN_FREE_MIB == 2560
+    finally:
+        os.environ.update({k: v for k, v in saved.items() if v is not None})
+        importlib.reload(config)   # 恢复现值，防污染同套其他用例
+
+
+BASE = f"http://127.0.0.1:{int(os.environ.get('MEMORY_ENGINE_PORT', '8766'))}"  # 默认=现值；env 覆盖供隔离实例
+
+
+def _daemon_up() -> bool:
+    try:
+        with urllib.request.urlopen(f"{BASE}/v1/health", timeout=2) as r:
+            return json.loads(r.read() or b"{}").get("db") is True
+    except Exception:
+        return False
+
+
+def _post_json(path: str, body: dict, timeout: int = 20):
+    req = urllib.request.Request(f"{BASE}{path}", json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+@pytest.mark.skipif(not _daemon_up(), reason="daemon 不可达（skip 不伪绿）")
+def test_contract_live_recall_shape_rerank_off():
+    """活体端点合同（生产默认态=关）：recall 200、结果条齐全、score_parts 无 rerank 分量。"""
+    st, d = _post_json("/v1/recall", {"query": "W3 合同测试 contract probe", "top_k": 3,
+                                      "caller": "w3-contract"})
+    assert st == 200, f"recall 应 200，得 {st}: {d}"
+    assert "results" in d and "took_ms" in d
+    for item in d["results"]:
+        assert {"id", "score", "score_parts"} <= set(item)
+        assert "rerank" not in item["score_parts"], \
+            "默认 off 时 score_parts 不得出现 rerank 分量（存量形状零变化合同）"
+    assert not d.get("degraded") or "rerank" not in (d.get("failed_routes") or {})

@@ -50,6 +50,9 @@ def get_core_block(request: Request, caller: str = "main",
     except Exception as e:  # noqa: BLE001 —— fail-open 语义在宿主侧，引擎侧真故障必须显式 500
         log.exception("core-block build failed")
         raise HTTPException(500, f"core-block 构建失败: {str(e)[:200]}") from None
+    # P4 staleness 观测打点：纯内存时间戳，不写 access_events/changelog/任何库表——
+    # 零副作用铁律（防「注入→计数→更易注入」自激）不破；重启进程后归零，metrics 侧如实标注。
+    eng.core_block_last_fetch = time.time()
     return {
         "text": out["text"],
         "ids": out["ids"],

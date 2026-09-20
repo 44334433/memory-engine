@@ -51,9 +51,10 @@ STALE_FRESH_DAYS, STALE_AGING_DAYS = 30, 90
 DEDUP_SIM = float(os.environ.get("MEMORY_ENGINE_DEDUP_SIM", "0.97"))  # cos 相似度阈值
 DEDUP_DAYS = int(os.environ.get("MEMORY_ENGINE_DEDUP_DAYS", "3"))     # 近 N 天语义判重窗口
 
-BANKS = ("hermes", "hermes-sessions", "knowledge", "reflection")
-# 评测/隔离专用 bank（env 逗号分隔扩展，与迁移 004 的 CHECK 对齐）
-BANKS = BANKS + tuple(b.strip() for b in os.environ.get("MEMORY_ENGINE_EXTRA_BANKS", "").split(",") if b.strip())
+BANKS = ("hermes", "hermes-sessions", "knowledge", "reflection", "hermes-docs")
+# 评测/隔离专用 bank（env 可扩展，逗号分隔）——多租户/评测场景动态 bank 的最小支持（2026-09-17）
+_extra = os.environ.get("MEMORY_ENGINE_EXTRA_BANKS", "")
+BANKS = BANKS + tuple(b.strip() for b in _extra.split(",") if b.strip())
 PRIORITIES = (1, 2, 3, 4, 5)
 
 POOL_MIN = 2
@@ -173,15 +174,16 @@ TYPE_DECAY_FACTORS: dict[str, float] = {
     "episodic": 1.0,   # 基准不可配（兼容不变量）
 }
 
-# —— W4: per-bank adaptive thresholds (dedup cos / decay scale) ——
-# ★Single change point: per-bank defaults live ONLY in the two dicts below; all call sites
-#   read through dedup_cos_for()/decay_scale_for(). No threshold literals elsewhere.
-#   Env append/override "bank=v,bank2=v2" (same minimal-support style as MEMORY_ENGINE_EXTRA_BANKS).
-# Unregistered bank → global fallback (DEDUP_SIM / scale 1.0) = legacy behavior, zero drift.
+# —— W4（2026-09-19 五轮反馈主题E 残余）：bank 级自适应阈值 ——
+# ★变更点（集中一处）：判重 cos 与衰减窗 scale 的 bank 级默认值只能改本节两个 dict；
+#   代码侧只经 dedup_cos_for()/decay_scale_for() 查表，任何调用路径不得出现阈值字面量。
+#   env 追加/覆盖 "bank=v,bank2=v2"（同 EXTRA_BANKS 最小支持风格；隔离实例实测不改生产值）。
+# 未登记 bank → 回退全局默认（DEDUP_SIM / scale 1.0）＝存量行为零变化（hermes-docs、
+#   eval_* 等即走回退；回退分支在 tests/test_w4_bank_thresholds.py 有等价断言）。
 
 
 def _env_bank_map(var: str) -> dict[str, float]:
-    """Parse 'bank=v,bank2=v2' env overrides; malformed value crashes at import (fail-fast)."""
+    """解析 'bank=v,bank2=v2' 形 env 覆盖；坏值=float() 启动期即炸（fail-fast，防静默半生效）。"""
     out: dict[str, float] = {}
     for part in (p.strip() for p in os.environ.get(var, "").split(",")):
         if part:
@@ -190,16 +192,15 @@ def _env_bank_map(var: str) -> dict[str, float]:
     return out
 
 
-# Dedup cos, derived from measured nearest-neighbor distributions (2026-09-19, 150 most-recent
-# items per bank; full evidence in the batch report):
-#   hermes: 29.3% of samples sit in [0.95,0.97) and a 10-pair eyeball audit found ALL of them to
-#     be same-fact rewrites the old flat 0.97 let through → lower to 0.95.
-#   reflection: 13.3% in-band, sampled pairs likewise all rewrites → 0.95.
-#   knowledge: in-band pairs include distinct records differing only by an embedded id
-#     (cos 0.9655-0.9664); lowering would false-suppress them, and in-band ≥0.97 mass measured 0,
-#     so raising is near-lossless → 0.98.
-#   Rollback condition (written down): 30-day spot-check per changed bank; if false-skip rate of
-#     items landing in [new_threshold,0.97) exceeds 20% → revert that bank to the global 0.97.
+# 判重 cos（2026-09-19 实测近邻分布定值，样本=各 bank 最近 150 条同 bank 最近邻 cos，
+# 明细与 eyeball 判定=~/.hermes/docs/03-执行落地/执行-W4-自适应阈值-2026-09-19.md）：
+#   hermes(0.95)：[0.95,0.97) 带占 29.3%(44/150)，抽 10 对全部为同事实复述（中英/改写对）
+#     ——0.97 整带漏放，降到 0.95 收编真重复；
+#   reflection(0.95)：带占 13.3%，抽 10 对全部复述对，同上；
+#   knowledge(0.98)：带内混有「仅编号不同」异条（outcome-e2e 用例 id 对 cos 0.9655-0.9664，
+#     降 0.95 即误杀）——反向收紧到 0.98（实测带内 ≥0.97 为 0，升档近零损失）；
+#   废弃条件（写死）：任一 bank 改值后 30 天抽检，若 [新阈值,0.97) 内被跳条目误杀率>20%
+#     → 该 bank 回调至全局 0.97 并在本行注释留证。
 BANK_DEDUP_COS: dict[str, float] = {
     "hermes": 0.95,
     "reflection": 0.95,
@@ -207,12 +208,11 @@ BANK_DEDUP_COS: dict[str, float] = {
 }
 BANK_DEDUP_COS = {**BANK_DEDUP_COS, **_env_bank_map("MEMORY_ENGINE_BANK_DEDUP_COS")}
 
-# Decay window scale (track days = base × TYPE_DECAY_FACTORS[type] × scale[bank], rounded).
-# From measured 30-day reuse signals (hits per item, whole-DB query 2026-09-19):
-#   hermes 10.1, knowledge 15.8 (high reuse → long-lived, ×1.5 longer windows);
-#   hermes-sessions 1.2 with 96.7% already faded (retired session-log bank, low value density
-#     → ×0.5 to speed it out of the way); reflection 4.4 mid → unregistered baseline 1.0
-#     (register only measured deviations, never blanket the map).
+# 衰减窗 scale（四条轨天数 = base × TYPE_DECAY_FACTORS[type] × scale[bank]，四舍五入取整）。
+# 2026-09-19 实测 30d 复用信号（hits/item，全库现算）定值：
+#   hermes 10.1 / knowledge 15.8（高频复用=长寿命 → ×1.5 延窗）；
+#   hermes-sessions 1.2 且 96.7% 已 faded（废弃归档 bank，技能已定性「价值密度低」→ ×0.5 加速出清）；
+#   reflection 4.4 居中 → 不登记=基准 1.0（只登记有实测依据的偏移，不拍脑袋铺满）。
 BANK_DECAY_SCALE: dict[str, float] = {
     "hermes": 1.5,
     "knowledge": 1.5,
@@ -222,12 +222,12 @@ BANK_DECAY_SCALE = {**BANK_DECAY_SCALE, **_env_bank_map("MEMORY_ENGINE_BANK_DECA
 
 
 def dedup_cos_for(bank: str) -> float:
-    """Per-bank dedup cos; unregistered bank falls back to global DEDUP_SIM (= legacy). Sole reader."""
+    """bank 级判重 cos；未登记回退全局 DEDUP_SIM（=现行为）。唯一读取入口。"""
     return BANK_DEDUP_COS.get(bank, DEDUP_SIM)
 
 
 def decay_scale_for(bank: str) -> float:
-    """Per-bank decay window scale; unregistered falls back to 1.0 (= legacy). Sole reader."""
+    """bank 级衰减窗缩放；未登记回退 1.0（=现行为）。唯一读取入口。"""
     return BANK_DECAY_SCALE.get(bank, 1.0)
 
 
@@ -262,49 +262,52 @@ CORE_W_POLARITY = 0.5   # polarity 主权重（唯一含负反馈的信号，cor
 CORE_W_ADOPT = 0.3      # 采纳（宿主引用，强信号）
 CORE_W_ACCESS = 0.2     # 访问频次（recall_hit，弱信号，log 归一）
 
-# —— W3 可插拔重排（2026-09-19；0.122 无过滤最差例批评的正面解法：四路 RRF 下异构记忆「竞争」而非「甄别」）——
+# —— W3 可插拔重排（2026-09-19，设计-外部反馈裁决全景 W3 项；0.122 批评正面解法）——
+# 根因：四路（vector/fts/time/graph）RRF 融合下异构记忆「竞争」而非「甄别」——
+# 重排=对 top N 候选做 cross-encoder（Qwen3-Reranker-0.6B，query×doc 联合编码）逐条相关性打分。
 # ★变更点（唯一开关入口）：MEMORY_ENGINE_RERANK_ENABLED 缺省 "0"=关；
-#   关=recall 重排段完全跳过（零开销，存量行为逐字节不变）；开=RRF 融合后、top-k 截断前 cross-encoder 精排。
+#   关=recall 重排段完全跳过（零开销，存量行为逐字节不变）；开=RRF 融合后、scored 截断前精排。
 RERANK_ENABLED = os.environ.get("MEMORY_ENGINE_RERANK_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
-# 模型目录默认挂嵌入模型同级（MEMORY_ENGINE_DIR 覆盖时自动跟随）。
+# 模型目录默认挂嵌入模型同级（unit 覆盖 MEMORY_ENGINE_DIR 时自动跟随，与 MODEL_DIR 同母目录）
 RERANK_MODEL_DIR = Path(os.environ.get(
     "MEMORY_ENGINE_RERANK_MODEL_DIR", str(MODEL_DIR.parent / "qwen3-reranker-0.6b")))
-# 设备：auto=按 GPU 总量预算闸选（mem_get_info 真实空载余量 ≥ RERANK_GPU_MIN_FREE_MIB 才上卡，
-#   否则退 CPU 并 log）；可显式 cuda/cpu。禁擦线分配（09-19 双 OOM 实证）。
+# 设备：auto=按 SOUL#25③ GPU 总量预算闸选（空载 ≥ RERANK_GPU_MIN_FREE_MIB 才上卡，否则退 CPU 并 log）；可显式 cuda/cpu
 RERANK_DEVICE = os.environ.get("MEMORY_ENGINE_RERANK_DEVICE", "auto")
-# GPU 预算（MiB）：模型 fp16 ~1250 + 批激活峰值 ~550 + 余量 ~760；embedder 1.14GB 常驻已
-# 体现在 free 口径（mem_get_info 读的是真实余量）。
+# GPU 预算估算（MiB，#25③ 禁擦线分配）：模型 fp16 ~1250 + 20候选×1024token 激活峰值 ~550 + 余量 ~760；
+# 现有 embedder 1.14GB 常驻已计入 free 口径（mem_get_info 读的是真实余量）。
 RERANK_GPU_MIN_FREE_MIB = int(os.environ.get("MEMORY_ENGINE_RERANK_GPU_MIN_FREE_MIB", "2560"))
-# 复杂度择优：只对 top N 精排（全量精排延迟翻倍无收益）。缺省 10=2026-09-19 A/B 实测
-# （10 候选×batch8 ≈110-130ms 达标；20 候选超延迟预算）；卡闲时可 env 调回 20。
+# #23 复杂度择优：只对 top N 精排（全量精排 60+ 候选延迟翻倍无收益）。缺省 10=实测校准：
+#   本机 12G 卡（多任务共用、embedder 常驻 1.14GiB）单批 20 条 lm_head 即 ~229ms，20 候选×3批
+#   ≈276ms 远超 150ms 预算；10 候选×batch4 ≈110-130ms 达标（2026-09-19 A/B 实测）。卡闲时可 env 调回 20。
 RERANK_TOP_N = int(os.environ.get("MEMORY_ENGINE_RERANK_TOP_N", "10"))
-# 单对 query+doc token 上限（记忆正文短于 1024）。
-RERANK_MAX_LEN = int(os.environ.get("MEMORY_ENGINE_RERANK_MAXLEN", "1024"))
-# 批大小上限=显存主变量（causal-LM lm_head 输出 B×L×151936 fp16；B=8 全 pad 到 1024 曾打爆
-# 12G 卡）；padding=longest + 下方每批 token 预算制打包后受控。
+RERANK_MAX_LEN = int(os.environ.get("MEMORY_ENGINE_RERANK_MAXLEN", "1024"))  # 单对 query+doc token 上限（记忆正文短于 1024）
+# 批大小上限=显存主变量：causal-LM 全位 lm_head 输出 B×L×151936（fp16）；B=8 且 pad 到全局
+# 1024 时单算子 1.9-2.1GiB 打爆 12G 卡（09-19 A/B OOM 实证）；padding=longest+预算制打包后受控。
 RERANK_BATCH = int(os.environ.get("MEMORY_ENGINE_RERANK_BATCH", "8"))
+# token 预算制打包（#23）：批大小按 批内最长L 反推使 N×L≤预算——短文档自动大批、长文档自动
+# 小批；固定 B 要么白付 padding 要么爆延迟（12G 卡实测 forward 吞吐 ~300-650 tok/ms）。
 RERANK_BATCH_TOKEN_BUDGET = int(os.environ.get("MEMORY_ENGINE_RERANK_BATCH_TOKEN_BUDGET", "2048"))
-# 乘法融合 final' = final×(floor+(1−floor)·p)：P(yes) 作调制量而非主分，保 RRF 主序的序
-# 守恒性（floor=0.2 ⇒ 重排最多把一条记录的分数乘到 5×）。
+# 乘法融合：final' = final × (RERANK_FLOOR + (1−RERANK_FLOOR)·p)，p=P(yes)∈[0,1]。
+# 刻意不取代 pri/life/stale/tier——重排只做「相关性甄别」，置信度/生命周期语义保留（异构竞争→甄别，
+# 但降权体系是拍板资产不可被一段模型分推翻）；floor=0.2 → 判无关条最多被压到 1/5 相对分。
+# ★变更点：floor 唯一调整入口=本行 env 默认值。
 RERANK_FLOOR = float(os.environ.get("MEMORY_ENGINE_RERANK_FLOOR", "0.2"))
-# 官方模型卡指令头（Transformers 用法节逐字核对 09-19；改动=换校准）。
+# 任务指令（官方：定制指令 +1~5%，建议英文书写；方向与 EMBED_QUERY_INSTRUCTION 对齐）
 RERANK_INSTRUCTION = os.environ.get(
     "MEMORY_ENGINE_RERANK_INSTRUCTION",
     "Given a memory retrieval query, judge whether the memory record answers or supports the query",
 )
 
-# —— Multi-tenant readiness layer (2026-09-19 governance call moved the trigger forward:
-# build the prep layer now; enforcement activates per-host later). ★Single switch:
-# MEMORY_ENGINE_MULTI_TENANT defaults "0"=off.
-#   off  = recall() passes filters through untouched — zero behavior change, byte-identical
-#          (asserted in tests/test_multi_tenant_rls.py, including object identity).
-#   on   = recall force-injects filters.tenant_id=config.TENANT_ID (an explicit caller value wins).
-# DB-side counterpart = scripts/migrations/008_rls.sql: policies pass through any session that
-#   does not set app.tenant_id, so applying the migration with this switch off is doubly inert.
-# Enabling a real tenant = three steps in the README ("Multi-tenancy"): migrate → backfill
-#   tenant_id (NULL-tenant rows become invisible once filtered!) → set env + session app.tenant_id.
-# Writes are intentionally NOT auto-stamped with tenant_id here: retain must pass it explicitly.
+# —— 多租户预备层（2026-09-19 拍板变更：触发条件由「真实多宿主接入事件」提前为「现在做预备层」，用户显式拍板）——
+# ★唯一开关入口：MEMORY_ENGINE_MULTI_TENANT 缺省 "0"=关。
+#   关 = recall() 对 filters 零改动（不注入、不拷贝——存量行为逐字节不变，
+#        tests/test_multi_tenant_rls.py 关态断言 + 对象同一性断言钉死）；
+#   开 = recall 强制注入 tenant_id=config.TENANT_ID 过滤（调用方显式传 filters.tenant_id 时尊重显式值）。
+# DB 侧配套 = scripts/migrations/008_rls.sql：策略对未设 app.tenant_id 的会话恒放行，
+#   故迁移先行应用 + 开关关 = 双重零行为；启用三步见 README「多租户」。
+# 写入侧本批刻意不自动打 tenant_id（预备层不改存量归属；retain 需显式传，见启用三步②）。
 MULTI_TENANT = os.environ.get("MEMORY_ENGINE_MULTI_TENANT", "0").strip().lower() in ("1", "true", "yes", "on")
+# 服务端默认租户标识（MULTI_TENANT=1 时 recall 缺省过滤值；存量行 tenant_id=NULL 必须先回填才可见）
 TENANT_ID = os.environ.get("MEMORY_ENGINE_TENANT_ID", "default")
 
-VERSION = "0.5.0-w3"
+VERSION = "0.5.1-obs"
