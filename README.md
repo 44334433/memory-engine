@@ -29,7 +29,7 @@ We ran a framework in production and hit exactly that wall: compressed context d
 
 - **Three-way hybrid retrieval** — dense (pgvector HNSW) + Chinese-optimized full-text (PGroonga) + structured filters, fused with RRF. Every hit ships `score_parts` so you can audit *why* it ranked — the field set itself is versioned (`schema_version`) so consumers can parse defensively.
 - **Lifecycle, not landfill** — every memory has a TTL state (`active` → `aged` → `archived` → `retired` → purge), with a fail-closed purge pipeline (daily backup verified + batch exported off-device + health check = all true, or nothing is deleted).
-- **Freshness protocol** — the host records a *version cursor* per session. When it comes back, the engine diffs "changes since your last read" into a bounded, domain-scoped digest. Miss a week? You get exactly what changed, not a firehose.
+- **Freshness protocol** — the host records a *version cursor* per session. When it comes back, the freshness layer diffs "changes since your last read" into a bounded, domain-scoped digest (in this reference deployment the diffing runs host-side against the engine's changelog seq). Miss a week? You get exactly what changed, not a firehose.
 - **Staleness gate at query time** — date-bucketed decay (fresh / aging / stale), known-outdated keyword scanning, and content-vs-reality consistency checks after config migrations. Dedup prevents repeats; the staleness gate prevents *resurrection*.
 - **Source-of-truth anchoring** — memories point at canonical facts instead of duplicating them. One truth, many indexes.
 
@@ -91,6 +91,8 @@ POST /v1/recall                 four-route hybrid search                     →
                                  filters: memory_type / as_of / date_range /
                                  staleness / tags / tenant_id / agent_id
 POST /v1/freshness/digest       what changed since my last cursor            → budgeted, domain-scoped
+                                 (host-side pattern in this build: raw material is changelog seq +
+                                  /v1/memories/{id}/chain; route not mounted — POST returns 404)
 GET  /v1/core-block             always-on entries under a hard char budget   → text + ids (default off)
 POST /v1/feedback               host outcome signal: adopted / corrected /
                                 useless (EMA polarity, feeds decay + pool)   → polarity
@@ -167,6 +169,54 @@ curl -s localhost:8766/v1/health | jq      # expect: status=ok, all four true
 pytest tests/ -v
 ```
 
+## Five-minute demo
+
+Four steps from empty to auditable memory — every command below and every output shown was run against the same `/v1` surface this README documents (captured 2026-09-20; `…` marks trimmed ids and text). The database layer is the compose image from Quick Start (`docker/`), nothing else.
+
+**1. Start** (once, ~2 min: image build + model download):
+
+```bash
+docker compose up -d                      # PG18 + pgvector + PGroonga, mapped to 127.0.0.1:5433
+pip install -e . && python -m memory_engine.download_model
+python -m memory_engine.cli serve &
+curl -s localhost:8766/v1/health | jq '.status'    # "ok" — then run the next three steps
+```
+
+**2. Write** — `POST /v1/retain` (context required; every write books a changelog seq):
+
+```bash
+curl -s -X POST localhost:8766/v1/retain -H 'content-type: application/json' -d '{
+  "bank": "knowledge", "caller": "me",
+  "items": [{"content": "Warehouse A stock: 42 cases", "context": "demo", "title": "A stock", "source_tier": "user"}]}'
+# → {"ids":["01a0bc1e-8641-…"],"dedup_skipped":0,"dedup_existing":[],"seq":56076,"took_ms":20.8}
+```
+
+**3. Read** — `POST /v1/recall`; the ranking arrives with its parts, versioned:
+
+```bash
+curl -s -X POST localhost:8766/v1/recall -H 'content-type: application/json' \
+  -d '{"query":"how many cases in warehouse A","top_k":3,"bank":"knowledge"}'
+# → {"results":[{"id":"01a0bc1e-8641-…","score":0.014631,
+#      "score_parts":{"schema_version":1,"rrf":0.016393,"pri":1.05,"life":0.85,
+#                     "stale":1.0,"tier_weight":1.0,"graph":0.0,
+#                     "outcome":null,"polarity":null,"routes":{"vector":1}},
+#      "ttl_state":"candidate","staleness":"fresh","memory_type":"episodic", …}], …}
+```
+
+**4. Revise — and watch the trail** — a correction supersedes instead of overwriting, and the ledger is queryable:
+
+```bash
+curl -s -X PATCH localhost:8766/v1/memories/01a0bc1e-8641-… \
+  -H 'content-type: application/json' -d '{"body":"Warehouse A stock: 37 cases","supersede":true}'
+# → {"id":"474c9f6d-81c3-…","superseded_from":"01a0bc1e-8641-…","is_current":true, …}
+
+curl -s "localhost:8766/v1/memories/474c9f6d-81c3-…/chain?max_hops=5"
+# → versions: [ {position 0, "42 cases", is_current: false, superseded_by: 474c9f6d-…},
+#               {position 1, "37 cases", is_current: true } ]
+```
+
+One honesty note, because step 4 is where the docs and the code once diverged: the cursor-diff **digest** of the freshness protocol runs **host-side** in this reference deployment — this build mounts no `/v1/freshness/digest` route (a POST there returns 404; the SDK maps that to `EndpointNotAvailable`). The engine side supplies the raw material the host digests against: the changelog seq on every write and the version chain above.
+
 ## The freshness protocol in one minute
 
 ```jsonc
@@ -187,7 +237,7 @@ pytest tests/ -v
 }
 ```
 
-Writes are deduplicated (semantic dedup with per-bank cosine thresholds — knowledge 0.98 / hermes 0.95 / default per config — against the last 30 days, context required). Hosts keep a per-session read cursor; the next visit gets `POST /v1/freshness/digest` — bounded by budget, domain-scoped, same-key collapses to the net change. **No digest ≠ nothing happened; it means nothing you haven't already read.**
+Writes are deduplicated (semantic dedup with per-bank cosine thresholds — knowledge 0.98 / hermes 0.95 / default per config — against the last 30 days, context required). Hosts keep a per-session read cursor; the next visit gets a `freshness/digest` computed from the engine's changelog seq (see the demo note: host-side pattern in this build) — bounded by budget, domain-scoped, same-key collapses to the net change. **No digest ≠ nothing happened; it means nothing you haven't already read.**
 
 ## Benchmark
 

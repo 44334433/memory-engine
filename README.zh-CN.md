@@ -29,7 +29,7 @@
 
 - **三路混合召回**——稠密向量（pgvector HNSW）+ 中文优化全文（PGroonga）+ 结构化过滤，RRF 融合。每条命中携带 `score_parts`，排序为什么靠前可以审计；字段集本身带版本（`schema_version`），下游可按版本防御性解析。
 - **生命周期，而非垃圾场**——每条记忆有 TTL 状态机（`active` → `aged` → `archived` → `retired` → purge），且 purge 管线 fail-closed：当日备份验证+批次异盘导出+健康检查，三者全真才准删，缺一不动。
-- **新鲜度协议**——宿主为每个会话记录「版本游标」。会话回来时，引擎把「你上次读取之后的变更」diff 成有预算上限、按域折叠的摘要。离开一周？你拿到的恰好是变了什么，而不是消防水管。
+- **新鲜度协议**——宿主为每个会话记录「版本游标」。会话回来时，新鲜度层把「你上次读取之后的变更」diff 成有预算上限、按域折叠的摘要（本参考实现中 diff 在宿主侧执行，原料是引擎的 changelog 序号）。离开一周？你拿到的恰好是变了什么，而不是消防水管。
 - **查询时新鲜度闸**——日期分桶衰减（fresh / aging / stale）+已知过期关键词扫描+配置迁移后的内容-现实一致性校验。查重防重复；新鲜度闸防「复活」。
 - **真源锚定**——记忆指向事实本体而非复制它。一个真相，多个索引。
 
@@ -74,6 +74,54 @@ curl -s localhost:8766/v1/health | jq      # 期望: status=ok, 四真全 true
 # 5. 测试
 pytest tests/ -v
 ```
+
+## 五分钟上手（demo）
+
+四步从零到可审计记忆——以下每条命令与输出均为 2026-09-20 对同一 `/v1` 面实跑采集（`…` 为省略的 id/文本），数据库层就是快速开始里的 compose 镜像（`docker/`），别无他物。
+
+**1. 启动**（一次性，约 2 分钟：构建镜像+下模型）：
+
+```bash
+docker compose up -d                      # PG18 + pgvector + PGroonga，映射 127.0.0.1:5433
+pip install -e . && python -m memory_engine.download_model
+python -m memory_engine.cli serve &
+curl -s localhost:8766/v1/health | jq '.status'    # "ok" 后走下面三步
+```
+
+**2. 写入** —— `POST /v1/retain`（context 必填；每次写入记一个 changelog 序号）：
+
+```bash
+curl -s -X POST localhost:8766/v1/retain -H 'content-type: application/json' -d '{
+  "bank": "knowledge", "caller": "me",
+  "items": [{"content": "A 仓库存 42 箱", "context": "demo", "title": "A仓库存", "source_tier": "user"}]}'
+# → {"ids":["01a0bc1e-8641-…"],"dedup_skipped":0,"dedup_existing":[],"seq":56076,"took_ms":20.8}
+```
+
+**3. 召回** —— `POST /v1/recall`；排序依据带着部件和版本到场：
+
+```bash
+curl -s -X POST localhost:8766/v1/recall -H 'content-type: application/json' \
+  -d '{"query":"A仓库存多少箱","top_k":3,"bank":"knowledge"}'
+# → {"results":[{"id":"01a0bc1e-8641-…","score":0.014631,
+#      "score_parts":{"schema_version":1,"rrf":0.016393,"pri":1.05,"life":0.85,
+#                     "stale":1.0,"tier_weight":1.0,"graph":0.0,
+#                     "outcome":null,"polarity":null,"routes":{"vector":1}},
+#      "ttl_state":"candidate","staleness":"fresh","memory_type":"episodic", …}], …}
+```
+
+**4. 修订，然后查账** —— 修订走 supersede 不走覆盖，账本可查：
+
+```bash
+curl -s -X PATCH localhost:8766/v1/memories/01a0bc1e-8641-… \
+  -H 'content-type: application/json' -d '{"body":"A 仓库存 37 箱（修订）","supersede":true}'
+# → {"id":"474c9f6d-81c3-…","superseded_from":"01a0bc1e-8641-…","is_current":true, …}
+
+curl -s "localhost:8766/v1/memories/474c9f6d-81c3-…/chain?max_hops=5"
+# → versions: [ {position 0, "42 箱", is_current: false, superseded_by: 474c9f6d-…},
+#               {position 1, "37 箱", is_current: true } ]
+```
+
+一句诚实话（这一步曾是文档与代码分叉处）：新鲜度协议的游标 **digest** 在本参考部署中跑在**宿主侧**——这个 build 没挂 `/v1/freshness/digest` 路由（POST 返回 404，SDK 映射为 `EndpointNotAvailable`）。引擎侧提供宿主做差的原料：每次写入的 changelog 序号 + 上面的版本链。
 
 ## 一分钟看懂新鲜度协议
 
