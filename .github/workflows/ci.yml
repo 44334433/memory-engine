@@ -27,6 +27,9 @@ jobs:
       MEMORY_ENGINE_EMBED_DEVICE: cpu
       MEMORY_ENGINE_WARMUP_BUDGET_MS: "10000"
       MEMORY_ENGINE_INJECTION_SCAN: external_only
+      MEMORY_ENGINE_WAL_ARCHIVE_DIR: /tmp/wal-archive-mem-ci  # runner 宿主无 PG wal_archive 目录（stage2 WAL 检查 FileNotFoundError）
+      MEMORY_ENGINE_SMOKE_P95_BUDGET_MS: "1500"  # CI 纯 CPU 嵌入延迟预算；生产 GPU 验收线仍 200ms（smoke 缺省）
+      MEMORY_ENGINE_STAGE2_WAL_REQUIRED: "0"  # CI 容器无 PG archiver（生产默认 1=原断言不动）
       HF_HUB_DISABLE_XET: "1"
       PYTHONUNBUFFERED: "1"
 
@@ -87,6 +90,7 @@ jobs:
 
       - name: Start engine daemon
         run: |
+          mkdir -p "$MEMORY_ENGINE_WAL_ARCHIVE_DIR"
           PYTHONPATH=src python3 -m memory_engine.cli serve &
           python3 - <<'PY'
           import json, sys, time, urllib.request

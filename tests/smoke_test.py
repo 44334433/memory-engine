@@ -13,6 +13,9 @@ import uuid
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("MEMORY_ENGINE_PORT", "8766"))
+# 延迟验收线：生产 GPU 现值 200ms 不动；CI 纯 CPU runner 嵌入延迟≈CPU 预算，
+# 由 MEMORY_ENGINE_SMOKE_P95_BUDGET_MS 显式放宽（缺省=200，语义零漂移）。
+P95_BUDGET_MS = float(os.environ.get("MEMORY_ENGINE_SMOKE_P95_BUDGET_MS", "200"))
 RESULTS = {"port": PORT, "checks": {}, "p95": None, "fail": []}
 CREATED_IDS: list[str] = []  # 本次冒烟写入的全部条目 id，尾部统一 purge（真库零残留）
 
@@ -322,7 +325,8 @@ def main() -> int:
     RESULTS["p95"] = round(p95, 1)
     RESULTS["p50"] = round(p50, 1)
     RESULTS["lat_max"] = round(lat[-1], 1)
-    check("p95.lt200", p95 < 200, f"p50={p50:.1f} p95={p95:.1f} max={lat[-1]:.1f}ms")
+    check("p95.lt_budget", p95 < P95_BUDGET_MS,
+          f"p50={p50:.1f} p95={p95:.1f} max={lat[-1]:.1f}ms budget={P95_BUDGET_MS:.0f}ms")
 
     # 7) export 冒烟
     st, raw = _export()

@@ -89,7 +89,14 @@ def main() -> int:
           and h["warm"] and h["ready"], f"status={h['status']} v={h['version']}")
     lc = http("GET", "/v1/lifecycle")
     check("lifecycle.thread_alive", lc["thread_alive"] is True)
-    check("lifecycle.wal_visible", lc["wal"].get("files", 0) >= 1, lc["wal"])
+    # WAL 归档可见性：生产主机=PG archiver 持续段落盘（现值断言不动）；CI 容器无
+    # archiver，设 MEMORY_ENGINE_STAGE2_WAL_REQUIRED=0 走显式 info（不伪绿：注明缘由）。
+    if os.environ.get("MEMORY_ENGINE_STAGE2_WAL_REQUIRED", "1") == "0":
+        check("lifecycle.wal_na_ci", True,
+              f"CI 无 PG archiver，wal 归档检查仅生产跑；dir={lc['wal'].get('dir')} "
+              f"files={lc['wal'].get('files')}")
+    else:
+        check("lifecycle.wal_visible", lc["wal"].get("files", 0) >= 1, lc["wal"])
 
     # 1. retain → candidate 入场（候选期 6d）
     c1 = retain_one("knowledge", f"{marker} 主条目：pgvector HNSW 部分索引按 bank 裁剪扫描面",
