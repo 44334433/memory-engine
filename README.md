@@ -147,7 +147,7 @@ pip install -e sdk/python    # from a checkout; py.typed included for editors
 Single-host daemon notes:
 
 ```bash
-git clone https://github.com/<you>/memory-engine.git && cd memory-engine
+git clone https://github.com/44334433/memory-engine.git && cd memory-engine
 
 # 1. Database (PostgreSQL 18 + pgvector + PGroonga)
 docker compose up -d

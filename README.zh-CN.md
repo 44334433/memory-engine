@@ -55,7 +55,7 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/<you>/memory-engine.git && cd memory-engine
+git clone https://github.com/44334433/memory-engine.git && cd memory-engine
 
 # 1. 数据库（PostgreSQL 18 + pgvector + PGroonga）
 docker compose up -d
