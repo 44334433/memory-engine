@@ -73,7 +73,8 @@ Short ADR-style notes for the trade-offs reviewers ask about. Each: the call, wh
 | **Visibility model** | caller-scoped: `main` / per-agent / subagent see disjoint views; `private` entries invisible to non-owners | zero cross-host leakage |
 | **Graceful degradation** | embedder failure → explicit fts-only mode (200 + `degraded` + `failed_routes`), self-heal thread retries every 60 s and pulls vector recall back | degraded ≠ dead, and it says so |
 | **Typed memory** | every entry classified `semantic` / `procedural` / `episodic` at write time (heuristic classifier, backfill script included); decay half-lives differ per type (semantic ×2 slowest, episodic ×1 unchanged); `filters.memory_type` narrows all three routes | 37k entries backfilled; filtered recall runs faster than unfiltered |
-| **Outcome feedback** | `POST /v1/feedback {memory_id, outcome: adopted/corrected/useless}` — per-item EMA polarity (α=0.1) feeds the decay shield; corrected/useless land in the hard-query pool | closes the learn-from-the-host loop, not just introspection |
+| **Outcome feedback** | `POST /v1/feedback {memory_id, outcome: adopted/corrected/useless}` — per-item EMA polarity (α=0.1) feeds the decay shield; corrected/useless land in the hard-query pool; optional `group` + `retrieved_ids` target what a recall actually consumed | closes the learn-from-the-host loop, not just introspection |
+| **Observability window** | `GET /v1/metrics` — 7-day read-only view: feedback liveness (writes vs distinct consumers, join-drift), injected two-state flags, skip counters, pinned share, core-block staleness | if a loop stops consuming, the number moves — no silent shadows |
 | **Core-memory block** | `GET /v1/core-block` — pinned entries plus auto-selected (high-polarity, repeatedly-adopted semantic/procedural) rendered under a hard char budget, read with zero side effects | host pulls it per turn; default off, no system-prompt writes |
 | **Lifecycle TTL** | six-state machine (trial → active → … → retired → deleted): adoption extends life, 90 days of zero access decays | unused memory stops costing quality |
 | **Disaster recovery** | PG snapshots + timer, plus full logical export (`GET /v1/export`) | RTO measured at 2.5 s |
@@ -96,6 +97,12 @@ POST /v1/freshness/digest       what changed since my last cursor            →
 GET  /v1/core-block             always-on entries under a hard char budget   → text + ids (default off)
 POST /v1/feedback               host outcome signal: adopted / corrected /
                                 useless (EMA polarity, feeds decay + pool)   → polarity
+                                optional: group (E1 per-group rollup) +
+                                retrieved_ids (M1 per-recall consumption)
+GET  /v1/metrics                read-only observability window (7d): feedback
+                                liveness probe (writes vs distinct consumers,
+                                join-drift), injected two-state flags, skip
+                                counters, pinned share, core-block staleness
 GET  /v1/memories               list/filter (bank, domain, state, time, as_of, type) → paginated
 GET  /v1/memories/{id}          single entry + full provenance
 GET  /v1/memories/{id}/chain    supersede-chain traversal (recursive CTE, max_hops, cycle guards)

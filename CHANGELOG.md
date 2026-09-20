@@ -6,7 +6,9 @@ All notable changes, newest first. Three rules keep this honest:
 - Every functional line cites a commit or a path that reproduces it. Claims that cannot be checked do not get an entry.
 - The README states what is true now; this file states what changed when. If a release only re-arranges the README, it still gets a line.
 
-## [Unreleased] — since tag v0.5.0 (2026-09-19), 15 commits
+## [Unreleased] — since tag v0.5.0 (2026-09-19), 16 commits
+
+- feat(observability): four borrowed-project enhancements (mirror of prod `c59dada`) — `GET /v1/metrics` read-only 7-day window (feedback liveness probe: 127 writes vs 86 distinct consumers, join-drift surfaced instead of hidden; injected two-state flags; skip counters; pinned share; core-block staleness); `POST /v1/feedback` gains optional `group` (E1 rollup) and `retrieved_ids` (M1 per-recall consumption targeting), backward compatible — old payloads verified 200 by curl; `test_w3` contract tests (8 factory pins + live rerank shape) and `test_w6` observability contract (5 pure + 4 live, skip-don't-fake) close the test gap the audit found. Motivation: a borrowed-project review found the feedback path had writes but no consumption-side evidence — liveness now has a number, not an assumption.
 
 - perf: hash-dedup before embedding (exact repeats skip GPU work), chunked GPU lock with `sleep(0)` hand-off (recall no longer queues behind a whole embedding batch), entity-extract starvation fix via empty-result attempt ledger (`00ebcd8`)
 - docs: SECURITY.md — poisoning threat model, fail-closed deletion, private disclosure (`3b957d0`); ROADMAP.md — trigger-gated S0–S4 ladder (`69989c5`); CONTRIBUTING expansion + evidence-first issue templates (`3da5eed`, `2c0f8b5`)
