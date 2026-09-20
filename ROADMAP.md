@@ -81,23 +81,14 @@ Adding an item requires stating its trigger signal in the PR; an item without a 
 trigger is a wish, not a roadmap entry. Removing an item requires its premise to be dead —
 say which, in the commit message.
 
-## 6. Repo mirror & CI reality (honest baseline, 2026-09-19)
+## 6. Repo mirror & CI (retired per self-rule)
 
-The public repo is a desensitized mirror of the operator's production deployment:
-`config.py` and private paths are rsync-excluded by design, and that exclusion drifted —
-the W3 rerank block was missing from the public `config.py` while `app.py`/`recall.py`
-imported all ten `RERANK_*` constants (daemon would raise `AttributeError` at startup).
-Fixed in this batch; `.env.example` gained the switch, `VERSION` stamped `0.5.0-w3`.
-
-CI state, because a merge-gate claim without its current verdict is fiction:
-
-- The `test` job is red on the last three main-branch runs (all 2026-09-19) — it dies at
-  step 4, *building the PG18 + pgvector + PGroonga service image*, before lint or pytest.
-  Infrastructure/upstream-image issue; fix already triggered by this observation.
-- Lint baseline behind that gate: ~107 mechanical findings under the CI flags (mostly
-  `E702` semicolon-packed filter lines, `E501`, two `F401`/`F841`) — one no-behavior-change
-  sweep, gated by the full suite.
-- Once the image builds, the next gate was the startup crash above — now cleared
-  (`import memory_engine.app` verified).
-
-This section's own retirement condition: delete it on CI's first green run.
+Retired 2026-09-20 when CI went green for the first time
+([run 36](https://github.com/44334433/memory-engine/actions/runs/35481867673),
+commit `affb1fe`): PG18+pgvector+PGroonga image builds, lint scope
+(`src tests sdk/python`) is at 0 under the CI flags, and the full pytest suite
+passes against a fresh service container. The public tree is a curated mirror
+of the production deployment, synced through `scripts/sync_public.sh`
+(rsync + `import memory_engine.app` smoke gate, abort-not-push); CI-environment
+deviations (CPU p95 budget, WAL-archiver and seeded-graph expectations) are
+explicit, env-gated, and documented in the workflow file.
