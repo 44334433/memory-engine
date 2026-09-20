@@ -298,4 +298,4 @@ Governance claims above are snapshot-checkable against the live daemon — `curl
 
 ## License
 
-MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) for the test discipline (all-green pytest + zero-match grep audit are the merge bar).
+MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) for the test discipline (all-green pytest + zero-match grep audit are the merge bar). Release history: [CHANGELOG.md](CHANGELOG.md) — version-bump-anchored, commit-cited, maintained per release.

@@ -136,4 +136,4 @@ pytest tests/ -v
 
 ## 许可证
 
-MIT。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)（全绿 pytest+零命中脱敏扫描是合入门槛）。
+MIT。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)（全绿 pytest+零命中脱敏扫描是合入门槛）。版本大事记见 [CHANGELOG.md](CHANGELOG.md)——以版本号变更为锚、逐条挂 commit，随 release 维护。
