@@ -123,6 +123,7 @@ def test_off_recall_byte_identical(monkeypatch):
     base = recall_mod.recall(pool, FakeEmbedder(), "q", None, "main", 10, {})
     explicit_none = recall_mod.recall(pool, FakeEmbedder(), "q", None, "main", 10, {},
                                       reranker=None)
+
     def strip_ms(d):  # took_ms=墙钟耗时，两次调用必然有微差——零变化断言比静态载荷
         import copy
         c = copy.deepcopy(d)

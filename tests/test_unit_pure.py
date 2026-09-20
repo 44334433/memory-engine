@@ -13,6 +13,7 @@ def test_uuid7_time_ordered_and_version():
     # v7 语义：前 48bit=毫秒时间戳（时间有序主键）；同毫秒内随机位无全序。
     # 注：原实现 byte8 未设 RFC4122 variant 位，UUID.version 属性可能为 None——本批不改核心，只校验时间前缀。
     a, b = util.uuid7(), util.uuid7()
+
     def ts_ms(u: uuid.UUID) -> int:
         s = str(u).replace('-', '')
         return int(s[:12], 16)

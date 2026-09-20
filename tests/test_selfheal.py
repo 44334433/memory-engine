@@ -4,7 +4,7 @@ import time
 
 def test_selfheal_pulls_back_to_loaded():
     import importlib
-    app = importlib.import_module("memory_engine.app")
+    importlib.import_module("memory_engine.app")  # side-effect load (selfheal registers hooks)
 
     class FakeEmbedder:
         def __init__(self):

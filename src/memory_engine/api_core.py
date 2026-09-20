@@ -231,7 +231,8 @@ def _record_hits(eng, hit_ids: list, caller: str, query: str) -> None:
     try:
         with eng.db.connection() as conn:
             db.record_access(conn, [(h, "recall_hit", caller, query[:500]) for h in hit_ids])
-            db.execute(conn, "UPDATE memories SET access_count=access_count+1, last_accessed_at=now() WHERE id = ANY(%s)", (hit_ids,))
+            db.execute(conn, "UPDATE memories SET access_count=access_count+1, "
+                       "last_accessed_at=now() WHERE id = ANY(%s)", (hit_ids,))
     except Exception as e:
         log.warning("access_events write failed: %s", e)
 
@@ -245,7 +246,9 @@ def health(request: Request):
             row = db.fetch_one(conn, "SELECT version() v, pg_database_size(current_database()) sz") or {}
             db_ok = bool(row)
             pg_info = {"server": (row.get("v") or "").split(",")[0], "db_size_bytes": row.get("sz")}
-            arch = db.fetch_one(conn, "SELECT archived_count a, failed_count f, last_archived_wal w FROM pg_stat_archiver") or {}
+            arch = db.fetch_one(
+                conn, "SELECT archived_count a, failed_count f, last_archived_wal w "
+                      "FROM pg_stat_archiver") or {}
             pg_info["archiver"] = {"archived": arch.get("a"), "failed": arch.get("f"), "last_wal": arch.get("w")}
             pg_info["memories"] = (db.fetch_one(conn, "SELECT count(*) c FROM memories") or {"c": 0})["c"]
     except Exception as e:

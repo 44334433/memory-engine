@@ -179,6 +179,7 @@ TYPE_DECAY_FACTORS: dict[str, float] = {
 #   Env append/override "bank=v,bank2=v2" (same minimal-support style as MEMORY_ENGINE_EXTRA_BANKS).
 # Unregistered bank → global fallback (DEDUP_SIM / scale 1.0) = legacy behavior, zero drift.
 
+
 def _env_bank_map(var: str) -> dict[str, float]:
     """Parse 'bank=v,bank2=v2' env overrides; malformed value crashes at import (fail-fast)."""
     out: dict[str, float] = {}
@@ -228,6 +229,7 @@ def dedup_cos_for(bank: str) -> float:
 def decay_scale_for(bank: str) -> float:
     """Per-bank decay window scale; unregistered falls back to 1.0 (= legacy). Sole reader."""
     return BANK_DECAY_SCALE.get(bank, 1.0)
+
 
 # —— 自进化专项 #1（2026-09-18 拍板 a）：outcome 反馈 API（POST /v1/feedback）——
 OUTCOME_TYPES = ("adopted", "corrected", "useless")   # 三值语义对齐 Mem0 feedback

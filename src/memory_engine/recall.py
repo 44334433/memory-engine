@@ -22,7 +22,6 @@ ROUTE_WEIGHTS = (("vector", config.W_VEC), ("fts", config.W_FTS), ("time", confi
 
 # —— P0 错误语义批（2026-09-16）：失败显式化，禁吞禁静默 ——
 
-
 class RecallRouteError(RuntimeError):
     """全路失败（P1 演进：503 只留给全路失败）。
 
@@ -307,8 +306,7 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             "created_at": m["created_at"].isoformat() if m["created_at"] else None,
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })
-    # RRF 同分 tie-break：updated_at 新者优先（外部反馈#2，2026-09-19）
-    scored.sort(key=lambda d: (d["score"], d["updated_at"] or ""), reverse=True)
+    scored.sort(key=lambda d: (d["score"], d["updated_at"] or ""), reverse=True)   # RRF 同分 tie-break：updated_at 新者优先（外部反馈#2，2026-09-19）
     # —— W3 可插拔重排（RRF 融合+因子评分之后、top_k 截断之前）——
     # 关（reranker=None）=本段整体条件跳过，零张量零分配，存量行为逐字节不变。
     # 开=只对 top RERANK_TOP_N(20) 候选精排（#23 延迟预算）；乘法融合 final'=final×(floor+(1−floor)·p)，

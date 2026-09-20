@@ -23,7 +23,7 @@ class FeedbackRequest(BaseModel):
     outcome: str                       # adopted|corrected|useless（endpoint 内校验→400）
     caller: Optional[str] = None       # 回执归属（进 access_events/changelog，仅截断不校验）
     query: Optional[str] = None        # 可选：宿主原始查询（corrected/useless 的 L3 信号源；
-                                       # 缺省回退该条最近 recall_hit 事件的 query）
+    # 缺省回退该条最近 recall_hit 事件的 query）
 
 
 def _record_l3(mem_id: str, l3: dict, caller: str | None, bank: str | None) -> None:
@@ -39,7 +39,7 @@ def feedback(req: FeedbackRequest, request: Request, bg: BackgroundTasks):
     t0 = time.perf_counter()
     if req.outcome not in outcome_mod.OUTCOMES:
         raise HTTPException(400, f"outcome 必须为 {list(outcome_mod.OUTCOMES)} 之一，"
-                                 f"收到 {req.outcome!r}")
+                            f"收到 {req.outcome!r}")
     eng = request.app.state.engine
     try:
         with eng.db.connection() as conn:

@@ -102,28 +102,38 @@ def list_memories(request: Request, bank: Optional[str] = None, state: Optional[
             raise HTTPException(status_code=400, detail=f"as_of 非法时间格式: {as_of!r}（需 ISO8601）")
     where, params = ["TRUE"], []
     if bank:
-        where.append("bank=%s"); params.append(bank)
+        where.append("bank=%s")
+        params.append(bank)
     if state:
-        where.append("ttl_state=%s"); params.append(state)
+        where.append("ttl_state=%s")
+        params.append(state)
     if owner:
-        where.append("owner=%s"); params.append(owner)
+        where.append("owner=%s")
+        params.append(owner)
     if domain:
-        where.append("domain=%s"); params.append(domain)
+        where.append("domain=%s")
+        params.append(domain)
     if tenant_id:
-        where.append("tenant_id=%s"); params.append(tenant_id)   # P1 二批：多宿主可查
+        where.append("tenant_id=%s")
+        params.append(tenant_id)   # P1 二批：多宿主可查
     if agent_id:
-        where.append("agent_id=%s"); params.append(agent_id)
+        where.append("agent_id=%s")
+        params.append(agent_id)
     if memory_type:
-        where.append("memory_type=%s"); params.append(memory_type)  # W2 分层：类型过滤
+        where.append("memory_type=%s")
+        params.append(memory_type)  # W2 分层：类型过滤
     if as_of:
         # as-of 快照：该时刻有效版本（含当时已生效、尚未失效的）；缺省不过滤=全量含历史（现状零变化）
         where.append("COALESCE(valid_at, created_at) <= %s AND (invalid_at IS NULL OR invalid_at > %s)")
         params += [as_of, as_of]
     if q:
-        where.append("search_text &@~ %s"); params.append(q)
+        where.append("search_text &@~ %s")
+        params.append(q)
     wsql = " AND ".join(where)
     with eng.db.connection() as conn:
-        rows = db.fetch_all(conn, f"SELECT {LIST_COLS} FROM memories WHERE {wsql} ORDER BY seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
+        rows = db.fetch_all(
+            conn, f"SELECT {LIST_COLS} FROM memories WHERE {wsql} "
+                  f"ORDER BY seq DESC LIMIT %s OFFSET %s", (*params, limit, offset))
         total = (db.fetch_one(conn, f"SELECT count(*) c FROM memories WHERE {wsql}", tuple(params)) or {"c": 0})["c"]
     return {"items": [_jsonable(r) for r in rows], "total": total, "limit": limit, "offset": offset}
 
@@ -156,50 +166,67 @@ def patch_memory(mid: uuid.UUID, req: PatchRequest, request: Request):
                                          "请改用 supersede=true 重存新版本")
         if req.supersede:
             return _patch_supersede(eng, conn, mid, cur, req)
-        new_title = req.title if req.title is not None else cur["title"]
         new_body = req.body if req.body is not None else cur["body"]
         new_od = _parse_dt(req.original_date) if req.original_date else cur["original_date"]
         for f in EDITABLE_TEXT:
             v = getattr(req, f)
             if v is not None:
-                sets.append(f"{f}=%s"); params.append(v)
+                sets.append(f"{f}=%s")
+                params.append(v)
         if req.priority is not None:
             if req.priority not in config.PRIORITIES:
                 raise HTTPException(422, f"priority 须在 {config.PRIORITIES}")
-            sets.append("priority=%s"); params.append(req.priority)
+            sets.append("priority=%s")
+            params.append(req.priority)
         if req.tags is not None:
-            sets.append("tags=%s::jsonb"); params.append(json.dumps(req.tags))
+            sets.append("tags=%s::jsonb")
+            params.append(json.dumps(req.tags))
         if req.tenant_id is not None:
-            sets.append("tenant_id=%s"); params.append(req.tenant_id)   # P1 二批：多宿主可改
+            sets.append("tenant_id=%s")
+            params.append(req.tenant_id)   # P1 二批：多宿主可改
         if req.agent_id is not None:
-            sets.append("agent_id=%s"); params.append(req.agent_id)
+            sets.append("agent_id=%s")
+            params.append(req.agent_id)
         if req.memory_type is not None:
-            sets.append("memory_type=%s"); params.append(req.memory_type)  # W2：人工纠偏通道
+            sets.append("memory_type=%s")
+            params.append(req.memory_type)  # W2：人工纠偏通道
         if req.pinned is not None:
-            sets.append("pinned=%s"); params.append(req.pinned)   # W1：pin/unpin（false 亦须生效→判 is not None）
+            sets.append("pinned=%s")
+            params.append(req.pinned)   # W1：pin/unpin（false 亦须生效→判 is not None）
         if req.ttl_state is not None:
-            sets.append("ttl_state=%s"); params.append(req.ttl_state)
+            sets.append("ttl_state=%s")
+            params.append(req.ttl_state)
             if req.ttl_state == "retired":
                 sets.append("embedding=NULL")
         if req.verify_status is not None:
-            sets.append("verify_status=%s"); params.append(req.verify_status)
+            sets.append("verify_status=%s")
+            params.append(req.verify_status)
             if req.verify_status in ("verified", "stale"):
                 sets.append("last_verified=now()")
         if req.original_date is not None or (req.body is not None and cur["original_date"] is None):
-            sets.append("original_date=%s"); params.append(new_od)
-            sets.append("staleness=%s"); params.append(staleness_of(new_od))
+            sets.append("original_date=%s")
+            params.append(new_od)
+            sets.append("staleness=%s")
+            params.append(staleness_of(new_od))
         if req.body is not None:
-            sets.append("content_hash=%s"); params.append(content_hash(cur["bank"], new_body))
-            sets.append("embed_model=%s"); params.append(config.EMBED_MODEL)
-            sets.append("embed_dim=%s"); params.append(config.EMBED_DIM)
-            sets.append("embed_ver=%s"); params.append(config.EMBED_VER)   # P1：改文重嵌=当前批次版本
+            sets.append("content_hash=%s")
+            params.append(content_hash(cur["bank"], new_body))
+            sets.append("embed_model=%s")
+            params.append(config.EMBED_MODEL)
+            sets.append("embed_dim=%s")
+            params.append(config.EMBED_DIM)
+            sets.append("embed_ver=%s")
+            params.append(config.EMBED_VER)   # P1：改文重嵌=当前批次版本
             vec = eng.embedder.embed_documents([new_body])[0]   # 改文即重嵌（GPU 在事务外：持池连接不做嵌入）
-            sets.append("embedding=%s::vector"); params.append(vec_to_pg(vec))
+            sets.append("embedding=%s::vector")
+            params.append(vec_to_pg(vec))
         sets.append("updated_at=now()")
         params.append(mid)
         # P1 原子化批：memories UPDATE + changelog INSERT 包同一事务（原：非原子，改文成功+账本缺账可能）
         with conn.transaction():
-            row = db.fetch_one(conn, f"UPDATE memories SET {', '.join(sets)} WHERE id=%s RETURNING {LIST_COLS}", tuple(params))
+            row = db.fetch_one(
+                conn, f"UPDATE memories SET {', '.join(sets)} "
+                      f"WHERE id=%s RETURNING {LIST_COLS}", tuple(params))
             db.log_changelog(conn, "update", mid, {"patched": [s.split("=")[0] for s in sets]})
     if not row:
         raise HTTPException(404, f"memory {mid} 不存在")
@@ -326,7 +353,9 @@ def export_memories(request: Request, since_seq: int = 0, limit: int = 100000):
         sent = 0
         while sent < limit:
             with eng.db.connection() as conn:
-                rows = db.fetch_all(conn, f"SELECT {LIST_COLS} FROM memories WHERE seq>%s ORDER BY seq LIMIT %s", (cursor, min(batch, limit - sent)))
+                rows = db.fetch_all(
+                    conn, f"SELECT {LIST_COLS} FROM memories WHERE seq>%s "
+                          f"ORDER BY seq LIMIT %s", (cursor, min(batch, limit - sent)))
             if not rows:
                 break
             for r in rows:

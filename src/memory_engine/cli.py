@@ -118,11 +118,16 @@ def cmd_wait_ready(args) -> int:
 
 def cmd_list(args) -> int:
     qs = f"?limit={args.limit}"
-    if args.bank: qs += f"&bank={args.bank}"
-    if args.state: qs += f"&state={args.state}"
-    if args.owner: qs += f"&owner={args.owner}"
-    if args.domain: qs += f"&domain={args.domain}"
-    if args.q: qs += f"&q={urllib.parse.quote(args.q)}"
+    if args.bank:
+        qs += f"&bank={args.bank}"
+    if args.state:
+        qs += f"&state={args.state}"
+    if args.owner:
+        qs += f"&owner={args.owner}"
+    if args.domain:
+        qs += f"&domain={args.domain}"
+    if args.q:
+        qs += f"&q={urllib.parse.quote(args.q)}"
     out = http("GET", f"/v1/memories{qs}")
     print(f"total={out['total']} shown={len(out['items'])}")
     _print_rows(out["items"], ("id", "bank", "ttl_state", "priority", "access_count", "adopt_count", "title"))
@@ -204,8 +209,10 @@ def cmd_transition(args) -> int:
 def cmd_consolidate(args) -> int:
     if args.action == "run":
         body = {}
-        if args.days: body["days"] = args.days
-        if args.sim: body["sim"] = args.sim
+        if args.days:
+            body["days"] = args.days
+        if args.sim:
+            body["sim"] = args.sim
         body["dry_run"] = args.dry_run
         out = http("POST", "/v1/consolidate", body)
         print(json.dumps(out, ensure_ascii=False))
@@ -241,46 +248,60 @@ def main() -> int:
     pw.set_defaults(fn=cmd_wait_ready)
 
     pl = sub.add_parser("list", help="列出记忆（GET /v1/memories）")
-    pl.add_argument("--bank"); pl.add_argument("--state"); pl.add_argument("--owner")
-    pl.add_argument("--domain"); pl.add_argument("--q")
+    pl.add_argument("--bank")
+    pl.add_argument("--state")
+    pl.add_argument("--owner")
+    pl.add_argument("--domain")
+    pl.add_argument("--q")
     pl.add_argument("--limit", type=int, default=20)
     pl.set_defaults(fn=cmd_list)
 
     pse = sub.add_parser("search", help="语义检索（POST /v1/recall）")
-    pse.add_argument("query"); pse.add_argument("--bank")
-    pse.add_argument("--top-k", type=int, default=10); pse.add_argument("--json", action="store_true")
+    pse.add_argument("query")
+    pse.add_argument("--bank")
+    pse.add_argument("--top-k", type=int, default=10)
+    pse.add_argument("--json", action="store_true")
     pse.set_defaults(fn=cmd_search)
 
     pg = sub.add_parser("get", help="单条详情（GET /v1/memories/{id}）")
-    pg.add_argument("id"); pg.set_defaults(fn=cmd_get)
+    pg.add_argument("id")
+    pg.set_defaults(fn=cmd_get)
 
     pd = sub.add_parser("delete", help="删除（默认软删=retired；--force 硬删）")
-    pd.add_argument("id"); pd.add_argument("--force", action="store_true")
+    pd.add_argument("id")
+    pd.add_argument("--force", action="store_true")
     pd.set_defaults(fn=cmd_delete)
 
     pa = sub.add_parser("adopt", help="采纳回执（准入闸信号）")
-    pa.add_argument("id"); pa.add_argument("--caller", default="cli")
+    pa.add_argument("id")
+    pa.add_argument("--caller", default="cli")
     pa.set_defaults(fn=cmd_adopt)
 
     pr = sub.add_parser("retrain", help="单条重嵌（POST /v1/memories/{id}/reembed）")
-    pr.add_argument("id"); pr.set_defaults(fn=cmd_retrain)
+    pr.add_argument("id")
+    pr.set_defaults(fn=cmd_retrain)
 
     pst = sub.add_parser("stats", help="引擎健康+状态分布（/v1/health + /v1/lifecycle）")
     pst.set_defaults(fn=cmd_stats)
 
     plc = sub.add_parser("lifecycle", help="生命周期查询/触发（status|run|candidates|history）")
     plc.add_argument("action", choices=["status", "run", "candidates", "history"], nargs="?", default="status")
-    plc.add_argument("--dry-run", action="store_true"); plc.add_argument("--limit", type=int, default=50)
+    plc.add_argument("--dry-run", action="store_true")
+    plc.add_argument("--limit", type=int, default=50)
     plc.set_defaults(fn=cmd_lifecycle)
 
     ptr = sub.add_parser("transition", help="人工生命周期转换（promote/demote/archive/revive/trialize）")
-    ptr.add_argument("id"); ptr.add_argument("to"); ptr.add_argument("--reason", default="")
+    ptr.add_argument("id")
+    ptr.add_argument("to")
+    ptr.add_argument("--reason", default="")
     ptr.set_defaults(fn=cmd_transition)
 
     pco = sub.add_parser("consolidate", help="整合（run|list）")
     pco.add_argument("action", choices=["run", "list"], nargs="?", default="list")
-    pco.add_argument("--days", type=int); pco.add_argument("--sim", type=float)
-    pco.add_argument("--dry-run", action="store_true"); pco.add_argument("--wait", action="store_true")
+    pco.add_argument("--days", type=int)
+    pco.add_argument("--sim", type=float)
+    pco.add_argument("--dry-run", action="store_true")
+    pco.add_argument("--wait", action="store_true")
     pco.set_defaults(fn=cmd_consolidate)
 
     args = p.parse_args()

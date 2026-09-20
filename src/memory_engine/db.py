@@ -128,7 +128,7 @@ def semantic_dup(conn, bank: str, qvec: str, days: int, sim: float) -> tuple[str
     """近 N 天同 bank 语义近似判重：返回 (id, cos)。"""
     row = fetch_one(
         conn,
-        f"""SELECT id, 1 - (embedding <=> %s::vector) AS cos
+        """SELECT id, 1 - (embedding <=> %s::vector) AS cos
             FROM memories
             WHERE bank=%s AND embedding IS NOT NULL AND ttl_state<>'retired' AND is_current
               AND created_at > now() - (%s || ' days')::interval
@@ -386,4 +386,3 @@ def graph_expand(conn, seeds: list, hops: int, vis_sql: str, vis_params: Sequenc
     sql = GRAPH_WALK_SQL.format(vis_sql=vis_sql)
     params = (ids, int(hops), *vis_params, ids, int(limit))
     return fetch_all(conn, sql, params)
-

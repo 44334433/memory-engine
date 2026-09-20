@@ -21,7 +21,8 @@ except ImportError:  # 独立仓最小环境（pytest 采集阶段不连库）
 from memory_engine import config                  # noqa: E402
 
 BASE = f"http://{config.HOST}:{config.PORT}"
-CLI = os.environ.get("MEMORY_ENGINE_CLI", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "memory-engine.sh"))
+_DEFAULT_CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy", "memory-engine.sh")
+CLI = os.environ.get("MEMORY_ENGINE_CLI", _DEFAULT_CLI)
 RESULTS: dict[str, dict] = {}
 
 
@@ -152,10 +153,14 @@ def main() -> int:
     #    W4（2026-09-19）：窗口=ACTIVE_DECAY_DAYS×类型系数×bank scale（knowledge=1.5），
     #    回拨量按条目实际 memory_type 现算（集中变更点=config，本脚本不另拍数字）。
     c1_mt = http("GET", f"/v1/memories/{c1}").get("memory_type") or "episodic"
-    c1_win = lambda base: int(round(base * config.TYPE_DECAY_FACTORS.get(c1_mt, 1.0)
-                                    * config.decay_scale_for("knowledge")))
-    sql(f"UPDATE memories SET created_at = created_at - interval '{c1_win(config.ACTIVE_DECAY_DAYS) + 1} days' WHERE id=%s", (c1,))
-    sql(f"UPDATE access_events SET ts = ts - interval '{c1_win(config.ACTIVE_DECAY_DAYS) + 1} days' WHERE memory_id=%s", (c1,))
+
+    def c1_win(base):
+        return int(round(base * config.TYPE_DECAY_FACTORS.get(c1_mt, 1.0)
+                         * config.decay_scale_for("knowledge")))
+    sql(f"UPDATE memories SET created_at = created_at - "
+        f"interval '{c1_win(config.ACTIVE_DECAY_DAYS) + 1} days' WHERE id=%s", (c1,))
+    sql(f"UPDATE access_events SET ts = ts - "
+        f"interval '{c1_win(config.ACTIVE_DECAY_DAYS) + 1} days' WHERE memory_id=%s", (c1,))
     run3 = http("POST", "/v1/lifecycle/run", {"dry_run": False})
     check("lifecycle.decay_90d", c1 in run3["transitions"]["active_to_decaying"]["ids"],
           str(run3["transitions"]["active_to_decaying"]))
@@ -178,14 +183,15 @@ def main() -> int:
                     | set(runB["transitions"]["decaying_to_archived"]["ids"]))
     decayed_ids = (set(runA["transitions"]["active_to_decaying"]["ids"])
                    | set(runB["transitions"]["active_to_decaying"]["ids"]))
+    counts_a = {k: v["count"] for k, v in runA["transitions"].items()}
+    counts_b = {k: v["count"] for k, v in runB["transitions"].items()}
     check("lifecycle.archive_180d", c1 in archived_ids or (c1 in decayed_ids and c1 in archived_ids),
-          f"A={ {k: v['count'] for k, v in runA['transitions'].items()} } "
-          f"B={ {k: v['count'] for k, v in runB['transitions'].items()} }")
+          f"A={counts_a} B={counts_b}")
     still = http("GET", f"/v1/memories/{c1}")
     rec2 = http("POST", "/v1/recall", {"query": q, "bank": "knowledge", "caller": "stage2-test"})
     check("archive.hidden_not_deleted",
           still["ttl_state"] == "archived" and all(r["id"] != c1 for r in rec2["results"]),
-          f"state={still['ttl_state']} recall_hits={sum(1 for r in rec2['results'] if r['id']==c1)}")
+          f"state={still['ttl_state']} recall_hits={sum(1 for r in rec2['results'] if r['id'] == c1)}")
 
     # 9. 人工干预转换 + 404/422 防御
     tr = http("POST", "/v1/lifecycle/transition",

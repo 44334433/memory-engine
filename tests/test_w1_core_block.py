@@ -110,7 +110,8 @@ def test_auto_score_monotonic_polarity_and_capped():
     s_10 = cb.auto_score(_row(polarity=1.0, adopt=10, access=50))
     s_100 = cb.auto_score(_row(polarity=1.0, adopt=100, access=10 ** 6))
     assert abs(s_100 - s_10) < 1e-9                   # 封顶：刷计数不涨分（防旁路）
-    assert cb.auto_score(_row(polarity=0.5, adopt=10, access=50)) == pytest.approx(0.5)  # 带底 pn=0，adopt/access 封顶=0.3+0.2
+    # 带底 pn=0，adopt/access 封顶=0.3+0.2
+    assert cb.auto_score(_row(polarity=0.5, adopt=10, access=50)) == pytest.approx(0.5)
     assert 0.0 <= cb.auto_score(_row(polarity=None, adopt=0, access=0)) <= 1.0
 
 

@@ -24,7 +24,6 @@ text 拼进注入段（user message 尾部）。**引擎绝不强推 system prom
 """
 import logging
 import time
-import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request

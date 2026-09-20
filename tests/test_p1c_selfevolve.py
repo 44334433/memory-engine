@@ -5,11 +5,8 @@ L3：tmp_path 文件漏斗（去重/上限/提案幂等）；
 L1：G07 配对检验数学 + 快照版本化 + 固化写回（离线，tmp 隔离）。
 """
 import json
-import re
 import uuid
-from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -17,7 +14,6 @@ import pytest
 from memory_engine import config, db
 from memory_engine import hard_queries as hq
 from memory_engine import lifecycle as lc
-from memory_engine.db import PgPool
 
 sys_path_scripts = str(Path(__file__).resolve().parent.parent / "scripts")
 
@@ -251,8 +247,8 @@ def test_l1_paired_gate_and_solidify(tmp_path, monkeypatch):
     assert changed == [str(cfg)]
     text = cfg.read_text(encoding="utf-8")
     assert "RRF_K = 50" in text
-    web_line = next(l for l in text.splitlines() if "TIER_WEIGHT_WEB" in l)
-    cron_line = next(l for l in text.splitlines() if "TIER_WEIGHT_CRON" in l)
+    web_line = next(ln for ln in text.splitlines() if "TIER_WEIGHT_WEB" in ln)
+    cron_line = next(ln for ln in text.splitlines() if "TIER_WEIGHT_CRON" in ln)
     assert '"0.9"' in web_line and '"0.95"' in cron_line
 
     # pending 连续两轮语义：一轮通过挂起；换 mutant=连续性断裂自动撤销（回滚）

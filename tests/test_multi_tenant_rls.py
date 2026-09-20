@@ -173,7 +173,7 @@ def test_migration_contract():
         assert "ENABLE ROW LEVEL SECURITY" in sql
         assert f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY" in sql
         assert f"ALTER TABLE {table} FORCE  ROW LEVEL SECURITY" in sql or \
-               f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY" in sql, f"{table} 缺 FORCE（属主绕过）"
+            f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY" in sql, f"{table} 缺 FORCE（属主绕过）"
         assert f"DROP POLICY IF EXISTS tenant_isolation ON {table}" in sql, f"{table} 缺幂等 DROP"
     assert "current_setting('app.tenant_id', true)" in sql
     assert sql.count("CREATE POLICY tenant_isolation ON") == 3
@@ -185,7 +185,8 @@ def test_migration_contract():
 # （策略只对非豁免角色生效——FORCE 覆盖属主、超级用户天然豁免，语义分工见迁移文件注释 c)。
 # 影子实例起法（本仓验收 2026-09-19 实证，零生产风险，端口 5444 避让生产 5433）：
 #   /usr/lib/postgresql/18/bin/initdb -D /tmp/me-shadow -A trust
-#   /usr/lib/postgresql/18/bin/pg_ctl -D /tmp/me-shadow -o "-p 5444 -k /tmp -c listen_addresses=127.0.0.1" -l /tmp/me-shadow.log start
+#   /usr/lib/postgresql/18/bin/pg_ctl -D /tmp/me-shadow \
+#     -o "-p 5444 -k /tmp -c listen_addresses=127.0.0.1" -l /tmp/me-shadow.log start
 #   psql -h 127.0.0.1 -p 5444 -d postgres -c "CREATE DATABASE memengine_shadow"
 #   psql … -d memengine_shadow -f docker/00-extensions.sql -f schema.sql
 #   MEMORY_ENGINE_PG_DSN='postgresql://postgres@127.0.0.1:5444/memengine_shadow' \

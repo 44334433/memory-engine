@@ -7,7 +7,6 @@ import http.client
 import json
 import os
 import statistics
-import subprocess
 import sys
 import time
 import uuid
@@ -40,26 +39,38 @@ def check(name: str, ok: bool, detail=""):
 
 
 ITEMS = [
-    ("knowledge", "pgvector HNSW 按 bank 建部分索引可裁剪扫描面，四库各建一个 HNSW 索引对应四路检索", "存储选型·pgvector", ["pgvector", "HNSW"], "memory-engine", 4, None),
-    ("knowledge", "PGroonga 内建 CJK 分词，中文全文检索无需外置 jieba 预分词，TokenBigram 为默认分词器", "存储选型·PGroonga", ["pgroonga", "中文检索"], "memory-engine", 4, None),
+    ("knowledge", "pgvector HNSW 按 bank 建部分索引可裁剪扫描面，四库各建一个 "
+                  "HNSW 索引对应四路检索", "存储选型·pgvector", ["pgvector", "HNSW"], "memory-engine", 4, None),
+    ("knowledge", "PGroonga 内建 CJK 分词，中文全文检索无需外置 jieba 预分词，"
+                  "TokenBigram 为默认分词器", "存储选型·PGroonga", ["pgroonga", "中文检索"], "memory-engine", 4, None),
     ("knowledge", "RRF 倒数排名融合：多路召回按 1/(60+rank) 加权求和，对异构分数天然鲁棒", "检索算法·RRF", ["RRF", "融合排序"], "memory-engine", 3, None),
     ("knowledge", "UUIDv7 前段是毫秒时间戳，做主键天然时间有序，B树索引写入局部性好", "工程·UUIDv7", ["uuid"], "memory-engine", 3, None),
-    ("knowledge", "pg_dump -Fc 自定义格式支持压缩与并行恢复，pg_restore --list 可先校验归档目录再恢复", "运维·备份", ["pg_dump", "备份"], "memory-engine", 3, None),
-    ("knowledge", "HNSW 图索引查询复杂度近对数，构建时 m 参数控制每层邻居数，ef_search 权衡召回与延迟", "存储选型·HNSW", ["hnsw"], "memory-engine", 3, None),
+    ("knowledge", "pg_dump -Fc 自定义格式支持压缩与并行恢复，pg_restore "
+                  "--list 可先校验归档目录再恢复", "运维·备份", ["pg_dump", "备份"], "memory-engine", 3, None),
+    ("knowledge", "HNSW 图索引查询复杂度近对数，构建时 m 参数控制每层邻居数，ef_search "
+                  "权衡召回与延迟", "存储选型·HNSW", ["hnsw"], "memory-engine", 3, None),
     ("hermes", "示例记忆A：沟通偏好类条目（合成测试数据，结论先行）", "示例·偏好", ["demo"], "demo-profile", 5, None),
     ("hermes", "示例记忆B：工作纪律类条目（合成测试数据，一次做到位优先）", "示例·纪律", ["demo"], "demo-rule", 5, None),
     ("hermes", "示例记忆C：网络环境类条目（合成测试数据，出网先探路由）", "示例·网络", ["demo"], "network", 4, None),
     ("hermes", "示例记忆D：备份纪律条目（合成测试数据，真源必须异盘备份）", "示例·备份", ["备份"], "ops", 4, None),
-    ("hermes-sessions", "会话示例：对齐记忆引擎架构——PG18+pgvector+PGroonga 三路召回，daemon 端口可配置", "会话·架构对齐", ["架构"], "sessions", 3, None),
-    ("hermes-sessions", "会话示例：嵌入模型选型——0.6B 级 fp16 常驻显存约 2-3GB，向量维度 1024", "会话·选型", ["embedding"], "sessions", 3, None),
+    ("hermes-sessions", "会话示例：对齐记忆引擎架构——PG18+pgvector+PGroonga 三路召回，"
+                        "daemon 端口可配置", "会话·架构对齐", ["架构"], "sessions", 3, None),
+    ("hermes-sessions", "会话示例：嵌入模型选型——0.6B 级 fp16 常驻显存约 2-3GB，"
+                        "向量维度 1024", "会话·选型", ["embedding"], "sessions", 3, None),
     ("reflection", "教训：断言前必须实证，管道里的 $? 是最后一个命令的退出码，会吞掉真实失败", "反思·工程纪律", ["教训"], "methodology", 4, None),
-    ("reflection", "反思：Socks 代理环境变量会泄漏到 Python httpx 导致 ImportError，直连场景应显式 unset", "反思·环境", ["教训"], "methodology", 3, None),
+    ("reflection", "反思：Socks 代理环境变量会泄漏到 Python httpx 导致 ImportError，"
+                   "直连场景应显式 unset", "反思·环境", ["教训"], "methodology", 3, None),
     ("reflection", "复盘：多实例共享端口前先 ss -ltnp 探测，蓝图端口规划要与在跑服务对账", "反思·部署", ["教训"], "methodology", 3, None),
-    ("knowledge", "systemd Type=notify 要求服务就绪后主动发 READY=1，配合 WatchdogSec 需周期发 WATCHDOG=1 心跳", "工程·systemd", ["systemd"], "memory-engine", 3, None),
-    ("knowledge", "PostgreSQL generate column STORED 列可被 PGroonga 直接建全文索引，中文搜索开箱即用", "存储·PG特性", ["postgres"], "memory-engine", 2, None),
-    ("hermes", "示例记忆E：时效分级——fresh 三十天以内、aging 三十天到九十天、stale 九十天以上分级降权", "示例·时效", ["时效"], "memory-engine", 4, None),
+    ("knowledge", "systemd Type=notify 要求服务就绪后主动发 READY=1，"
+                  "配合 WatchdogSec 需周期发 WATCHDOG=1 心跳", "工程·systemd", ["systemd"], "memory-engine", 3, None),
+    ("knowledge", "PostgreSQL generate column STORED 列可被 PGroonga 直接建全文索引，"
+                  "中文搜索开箱即用", "存储·PG特性", ["postgres"], "memory-engine", 2, None),
+    ("hermes", "示例记忆E：时效分级——fresh 三十天以内、aging 三十天到九十天、stale "
+               "九十天以上分级降权", "示例·时效", ["时效"], "memory-engine", 4, None),
     ("hermes-sessions", "会话示例：验收线——recall P95 两百毫秒以内硬指标，预热失败等于启动失败", "会话·验收", ["验收"], "sessions", 4, None),
-    ("reflection", "观察：时间序列回测要先冻结切片再跑策略，防止未来函数污染信号统计", "反思·方法", ["回测"], "methodology", 2, "2026-07-28T10:00:00+08:00"),  # stale >90d
+    ("reflection", "观察：时间序列回测要先冻结切片再跑策略，"
+                   "防止未来函数污染信号统计", "反思·方法", ["回测"], "methodology", 2,
+     "2026-07-28T10:00:00+08:00"),  # stale >90d
 ]
 
 SEMANTIC_QUERIES = [
@@ -127,14 +138,15 @@ def main() -> int:
         check(f"recall.semantic[{i}]", st == 200 and bool(top) and "rrf" in parts,
               f"{st} took={r.get('took_ms')} routes={r.get('routes')}")
         if i == 0:
-            RESULTS["semantic_top"] = {"query": q, "title": top.get("title"), "routes": r.get("routes"), "score_parts": parts}
+            RESULTS["semantic_top"] = {"query": q, "title": top.get("title"),
+                                       "routes": r.get("routes"), "score_parts": parts}
 
     st, r = req("POST", "/v1/recall", {"query": FTS_QUERY, "caller": "main", "top_k": 5})
     fts_hit = any("fts" in x["score_parts"]["routes"] for x in r.get("results", []))
     check("recall.fts_route", st == 200 and fts_hit, f"routes={r.get('routes')}")
     st, r = req("POST", "/v1/recall", {"query": TIME_QUERY, "caller": "main", "top_k": 30})
     time_hit = any("time" in x["score_parts"]["routes"] for x in r.get("results", [])) \
-               or (r.get("routes") or {}).get("time", 0) > 0
+        or (r.get("routes") or {}).get("time", 0) > 0
     check("recall.time_route", st == 200 and time_hit, f"routes={r.get('routes')}（库为活态：聚合+明细双判定，2026-09-16 修复）")
 
     # 可见性：subagent 看不到 private/他人 agent 条目
@@ -152,13 +164,12 @@ def main() -> int:
     # 4) PATCH（只动本次写入的条目 mid=CREATED_IDS[0]，禁碰库内真实记忆——2026-09-16 事故修复）
     mid = CREATED_IDS[0]
     st, orig = req("GET", f"/v1/memories/{mid}")
-    old_pri = orig.get("priority")
     st, r = req("PATCH", f"/v1/memories/{mid}", {"priority": 5, "tags": ["patched"]})
     check("patch.fields", st == 200 and r.get("priority") == 5, f"{st} {r}")
     st, r = req("PATCH", f"/v1/memories/{mid}", {"body": orig.get("body") + "（补一句触发重嵌）"})
     check("patch.reembed", st == 200 and r.get("has_embedding"), f"{st}")
     st, r = req("POST", "/v1/recall", {"query": f"{orig['title']} 补一句触发重嵌",
-                                        "caller": "main", "top_k": 3})
+                                       "caller": "main", "top_k": 3})
     check("patch.recall_after_patch", st == 200 and any(x["id"] == mid for x in r.get("results", [])), "")
 
     # 4b) W1 核心记忆块 core-block（2026-09-18）：形状/默认值/pin→入块/unpin→出块/预算闸/P95
@@ -282,10 +293,12 @@ def main() -> int:
     st, r = req("DELETE", f"/v1/memories/{mid}")
     check("delete.retired", st == 200 and r.get("state") == "retired", f"{r}")
     st, r = req("POST", "/v1/recall", {"query": f"{orig['title']} 补一句触发重嵌",
-                                        "caller": "main", "top_k": 5})
+                                       "caller": "main", "top_k": 5})
     check("delete.recall_gone", st == 200 and not any(x["id"] == mid for x in r.get("results", [])), "")
     st, r = req("GET", f"/v1/memories/{mid}")
-    check("delete.get_still_exists", st == 200 and r.get("ttl_state") == "retired" and r.get("has_embedding") is False, f"{r.get('ttl_state')},{r.get('has_embedding')}")
+    check("delete.get_still_exists",
+          st == 200 and r.get("ttl_state") == "retired" and r.get("has_embedding") is False,
+          f"{r.get('ttl_state')},{r.get('has_embedding')}")
     st, r = req("DELETE", f"/v1/memories/{mid}?purge=true")
     check("delete.purge", st == 200 and r.get("state") == "deleted", f"{r}")
 
@@ -311,9 +324,12 @@ def main() -> int:
 
     # 8) 对账（只读直查：access_events / changelog）
     import psycopg
-    conn = psycopg.connect(os.environ.get("MEMORY_ENGINE_PG_DSN", "postgresql://memengine@127.0.0.1:5433/memengine"), autocommit=True)
+    conn = psycopg.connect(
+        os.environ.get("MEMORY_ENGINE_PG_DSN", "postgresql://memengine@127.0.0.1:5433/memengine"),
+        autocommit=True)
     with conn.cursor() as cur:
-        cur.execute("SELECT (SELECT count(*) FROM memories), (SELECT count(*) FROM changelog), (SELECT count(*) FROM access_events)")
+        cur.execute("SELECT (SELECT count(*) FROM memories), "
+                    "(SELECT count(*) FROM changelog), (SELECT count(*) FROM access_events)")
         m, c, a = cur.fetchone()
     conn.close()
     RESULTS["reconcile"] = {"memories": m, "changelog": c, "access_events": a}

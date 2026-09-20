@@ -29,7 +29,7 @@ RUN apt-get update \
       https://www.postgresql.org/media/keys/ACCC4CF8.asc \
  && echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' \
       > /etc/apt/sources.list.d/pgdg.list \
- && curl -fsSL https://packages.groonga.org/ubuntu/groonga-archive-keyring.gpg \
+ && curl -fsSL https://packages.groonga.org/debian/groonga-archive-keyring.gpg \
       -o /usr/share/keyrings/groonga-archive-keyring.gpg \
  && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/groonga-archive-keyring.gpg] https://packages.groonga.org/ubuntu noble universe' \
       > /etc/apt/sources.list.d/groonga-org.list \

@@ -268,7 +268,7 @@ def scan(conn) -> dict:
         ("decaying_to_active", lambda: revive_decaying(conn)),
         ("decaying_to_active_adopt", lambda: upgrade_adopted(conn)),     # L2：adopted≤30d 强信号升级
         ("trial_to_decaying_zero_access", lambda: _decay_zero_access(conn, "trial")),   # L2：零访问
-        ("active_to_decaying_zero_access", lambda: _decay_zero_access(conn, "active")), # L2：零访问
+        ("active_to_decaying_zero_access", lambda: _decay_zero_access(conn, "active")),  # L2：零访问
         ("decaying_to_archived", lambda: archive_decaying(conn)),
     ]
     out: dict = {"ts": datetime.now(timezone.utc).isoformat(), "transitions": {}}

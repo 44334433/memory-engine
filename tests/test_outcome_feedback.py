@@ -14,7 +14,7 @@ BASE = "http://127.0.0.1:8766"
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))
 
-from memory_engine import config, outcome  # noqa: E402
+from memory_engine import outcome  # noqa: E402
 
 
 def _post(body: dict):

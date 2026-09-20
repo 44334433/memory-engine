@@ -4,7 +4,6 @@
 PG 用例在专用临时 schema 跑**真实迁移 SQL / 生成列 / 递归 CTE**（不碰生产数据，结束即删）；
 离线用例假 pool/conn 直调生产代码路径（与 P0/P1 一批套件同风格）。
 """
-import importlib
 import uuid
 from contextlib import nullcontext
 from pathlib import Path
@@ -13,7 +12,7 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
-from memory_engine import api_core, config, db
+from memory_engine import config, db
 from memory_engine import recall as recall_mod
 from memory_engine.api_core import RetainItem
 
@@ -133,7 +132,9 @@ def test_migration_002_idempotent(pg):
         conn, "SELECT indexname FROM pg_indexes WHERE schemaname=%s", (schema,))}
     assert {"idx_mem_current", "idx_mem_tenant", "idx_mem_agent", "uq_edge_mem", "uq_edge_ent",
             "uq_entity_name", "uq_mem_dedup"} <= idx
-    rows = db.fetch_all(conn, "SELECT id, created_at, valid_at, invalid_at, is_current FROM memories ORDER BY created_at")
+    rows = db.fetch_all(
+        conn, "SELECT id, created_at, valid_at, invalid_at, is_current "
+              "FROM memories ORDER BY created_at")
     assert len(rows) == 2                                   # 重跑不增删行
     for r in rows:
         assert r["valid_at"] == r["created_at"]             # 回填：事件时间缺省=created_at
@@ -165,7 +166,8 @@ def test_supersede_time_truncation(pg):
     again = db.supersede_memory(conn, old["id"], _mem_fields(body="第三次版本", valid_at=va))
     assert again is None
     assert db.fetch_one(conn, "SELECT count(*) c FROM memories")["c"] == 4   # 夹具 2 种子 + 旧 + 新（无第三次）
-    assert db.fetch_one(conn, "SELECT invalid_at FROM memories WHERE id=%s", (old["id"],))["invalid_at"].isoformat() == va
+    old_row = db.fetch_one(conn, "SELECT invalid_at FROM memories WHERE id=%s", (old["id"],))
+    assert old_row["invalid_at"].isoformat() == va
 
 
 # —————————————————— ③ 图召回 1 跳（真实 CTE + RRF 融合） ——————————————————
@@ -195,6 +197,7 @@ def test_graph_recall_1hop(pg, monkeypatch):
     assert by_id[str(m2)]["score_parts"]["routes"]["graph"] == 1
     assert by_id[str(m2)]["score_parts"]["graph"] == round(config.W_GRAPH / (config.RRF_K + 1), 6)
     # 图路失败=显式降级不炸主召回（failed_routes.graph 登记，503 语义不掺入）
+
     def _boom(*a, **k):
         raise RuntimeError("edges 表挂了")
     monkeypatch.setattr(db, "graph_expand", _boom)

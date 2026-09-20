@@ -24,9 +24,11 @@ def _mem_pred(alias: str, bank: Optional[str], domain: Optional[str]) -> tuple[s
         return "TRUE", []
     conds, params = [], []
     if bank:
-        conds.append("m.bank=%s"); params.append(bank)
+        conds.append("m.bank=%s")
+        params.append(bank)
     if domain:
-        conds.append("m.domain=%s"); params.append(domain)
+        conds.append("m.domain=%s")
+        params.append(domain)
     return (f"EXISTS (SELECT 1 FROM memories m WHERE m.id = e.{alias} "
             f"AND {' AND '.join(conds)})", params)
 
