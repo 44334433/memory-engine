@@ -190,6 +190,20 @@ curl -s "localhost:8766/v1/memories/474c9f6d-81c3-…/chain?max_hops=5"
 
 为 [Hermes Agent](https://hermes-agent.nousresearch.com/docs)（Nous Research 开源的 agent 框架）构建的记忆层；超大工具输出的「引用化+回查」思路参考 [NeverFull 压缩代理](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy)（设计研究——尚未接线）。
 
+**三条边界，写在宣传语到此为止的地方**（2026-09-21 第五轮外部反馈后补，免得读者自己推断）：
+
+1. **图谱 = 轻量图增强召回，不是 temporal KG 服务。** 召回路是实体层上的 1 跳拉回——2026-09-18 全量抽取快照 2,463 实体 / 7,975 条带类型的语义边（2026-09-21 实测现库 3,989 / 13,788），外加可浏览的 2 跳邻居端点。这不是 Zep/Graphiti 的地盘：多跳图推理、实体消歧（现按词面合并，触发条件见 ROADMAP §2）、时序边失效都是 roadmap 项、不在本期。诚实的自证，来自现库计数：`edges` 有 `valid_at`/`invalid_at` 双时态列，而 **13,788 条边里 `invalid_at` 置位数为 0**——schema 是双时序的，失效管线还没接线。
+2. **记忆分类 = 有、启发式、情景为主。** 每条记忆标注 `semantic`/`procedural`/`episodic`：宿主可在 retain 时显式传 `memory_type`（`api_core` 校验），或由写入期启发式分类器兜底，TTL 窗口按类型缩放。2026-09-21 实测分布：episodic 23,549 · procedural 14,987 · semantic 921。薄的地方直说：分类器没有标注精度测量，程序性记忆是被存储和衰减调度、不被*执行*——执行语义留在宿主侧。类型深化（分类质量、程序性执行契约）在 roadmap。
+3. **生产治理 = 单用户自托管优先。** 多宿主字段已预置（`tenant_id`/`agent_id`、RLS 迁移——全部默认关闭），但放进第二个宿主有两道今天还不存在的硬前置：配额隔离与隐私边界（对应上节「单机规模」条；触发式阶梯见英文 README「Scaling path」节 S2 余项）。过载行为只有 503+`retryable`——没有按客户端的 429 限流、没有熔断。这是多租户路径上点名登记的缺口，不是藏起来的缺口。
+
+## 生态与集成路线
+
+现状、排队项、一条留档更正（2026-09-21 补——第五轮反馈读的是过时快照）：
+
+- **现状：** 类型化 Python SDK——`sdk/python/memoryengine`（MIT、httpx、全 `/v1` 面 + 异常映射、25 例 mock 传输测试，`7694b3f`，2026-09-17）；REST `/v1`；CLI——`src/memory_engine/cli.py`；LangChain 适配器（`integrations/langchain_memory.py`，`930a226`）；零构建图谱 UI（`deploy/graph.html`）；全量 JSONL 备份走 `GET /v1/export`。
+- **路线：** **MCP server**——已登记立项拍板（backlog `7dd74d9f`，2026-09-21）：stdio 桥映射 retain/recall/feedback/metrics 端点，是多宿主路线的最短路径、约 1 人日。**TS SDK**——按需；尚无需求信号，刻意不排期。**导入 API**——planned：`GET /v1/export` 已存在但没有对等的重导入端点，备份恢复目前靠宿主侧工具。
+- **防误读声明：**「无 Python SDK / 无 license / 无贡献指南」三条对本仓 `main` 均为伪：`sdk/python/` 2026-09-17 已发布，`LICENSE`（MIT）与 `CONTRIBUTING.md` 自首个公开快照（`9daa9c5`，2026-09-16）即在树中。早于这些 commit 的评审描述的是评审的时滞，不是仓库的缺口——请附上你查看时的 commit。
+
 ## 运维工具
 
 - [`scripts/purge_archived.py`](scripts/purge_archived.py) — archived-TTL 物理清理，fail-closed 三重前置闸（当日备份在位、批次导出异盘、引擎健康四真）。默认 dry-run；删除只走 HTTP API，禁直改数据库。

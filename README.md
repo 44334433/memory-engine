@@ -336,6 +336,12 @@ When a real second host connects:
 
 Built as a memory layer for [Hermes Agent](https://hermes-agent.nousresearch.com/docs), an open-source agent framework by Nous Research; the reference-and-callback idea for oversized tool outputs takes after [NeverFull compression proxy](https://github.com/061115xhsm/NeverFull-NeverStop-LLM-Context-Compaction-Proxy) (design study — not yet wired in).
 
+**Three boundaries, stated where the pitch ends** (added 2026-09-21 after the round-5 external review, so nobody has to infer them):
+
+1. **Graph = light graph-augmented recall, not a temporal KG service.** The recall route is a one-hop pull-back over the entity layer — 2,463 entities / 7,975 typed semantic edges at the 2026-09-18 full-corpus snapshot (3,989 / 13,788 on the live store, measured 2026-09-21) — plus a browsable two-hop neighbors endpoint. This is not Zep/Graphiti territory: multi-hop graph reasoning, entity disambiguation (entities merge lexically today, trigger on ROADMAP §2), and temporal edge invalidation are roadmap work, not this release. The honest tell, counted from the live DB: `edges` carries `valid_at`/`invalid_at` columns and **0 of 13,788 edges has ever had `invalid_at` set** — the schema is bitemporal, the invalidation pipeline isn't wired yet.
+2. **Memory typing = present, heuristic, episodic-major.** Every entry is `semantic` / `procedural` / `episodic`; the host may pass `memory_type` explicitly at retain (`api_core` validates it) or let the write-time classifier assign it, and TTL windows scale per type. Live distribution, measured 2026-09-21: episodic 23,549 · procedural 14,987 · semantic 921. The thin parts, said plainly: the classifier has no labeled-precision measurement, and a procedural memory is stored and decay-scheduled, not *executed* — execution semantics stay host-side. Type-depth work (classification quality, procedural execution contracts) is roadmap, not shipped.
+3. **Production governance = single-user self-hosted first.** Multi-host fields are pre-staged (`tenant_id`/`agent_id`, RLS migration — all default-off), but letting a second host in has two hard prerequisites that do not exist today: quota isolation and privacy boundaries (the remaining-S2 line in the Scaling path above). Overload behavior is 503+`retryable` only — there is no per-client 429 rate limiting and no circuit breaker. That is a named gap on the multi-tenant path, not a hidden one.
+
 ## What's actually different
 
 The table above compares categories; this one names names — and the honest headline first: **no single mechanism here is unprecedented.** Hybrid retrieval exists in Mem0 and Zep, temporal validity exists in Zep, memory SDKs exist in LangMem; none of them ship LLM consolidation as refined a pipeline as Mem0/Zep do (ours deliberately stops at human-reviewed drafts). The defensible claim is the **combination** — lifecycle + freshness cursor + per-write audit + fail-closed deletion as one loop, in one daemon — and the failure behavior engineered as first-class.
@@ -347,6 +353,14 @@ The table above compares categories; this one names names — and the honest hea
 | **LangMem** | In-process LangChain SDK: memory managers and prompt-optimizer loops; its docs publish no benchmark numbers as of 2026-09 | A library has no independent enforcement point — anything that can import can bypass. The daemon-at-127.0.0.1 is a trust boundary choice, not packaging laziness |
 
 Two anti-marketing warnings. First, **those numbers are not comparable to our R@5 0.652**: Mem0/Zep report end-to-end answer accuracy judged by an LLM; ours is retrieval-only scoring with no LLM in the loop — different yardsticks, deliberately not ranked against each other. Second, single-point moats here are thin on purpose: the bet is that for agent memory, the boring properties (what's still true, who changed what, deletion with receipts) compose into something none of the three ships together as its *core* loop — and if a competitor ever does, this comparison table should get uncomfortable to maintain.
+
+## Ecosystem & integration paths
+
+What exists today, what is queued, and one correction on the record (added 2026-09-21 — the round-5 review scored this repo's ecosystem from a stale snapshot):
+
+- **Today:** typed Python SDK — `sdk/python/memoryengine`, MIT, httpx, full `/v1` surface with exception mapping, 25 mock-transport tests (`7694b3f`, 2026-09-17); REST `/v1` (API surface above); CLI — `src/memory_engine/cli.py`; LangChain adapter — `BaseMemory` + `BaseRetriever` over HTTP (`integrations/langchain_memory.py`, `930a226`); zero-build graph UI (`deploy/graph.html`); full-corpus JSONL backup via `GET /v1/export`.
+- **Queued:** **MCP server** — registered decision item (backlog `7dd74d9f`, decided 2026-09-21): stdio bridge mapping the retain/recall/feedback/metrics endpoints; the shortest path to the multi-host line, ~1 person-day. **TS SDK** — on demand; no demand signal yet, deliberately unscheduled. **Import API** — planned: `GET /v1/export` exists but has no re-import counterpart endpoint; backup restore today means host-side tooling.
+- **Anti-misreading note:** "no Python SDK / no license / no contributing guide" — all three are false of this repo's `main`: `sdk/python/` shipped 2026-09-17, and `LICENSE` (MIT) and `CONTRIBUTING.md` have been in the tree since the first public snapshot (`9daa9c5`, 2026-09-16). A review that predates those commits describes staleness of the review, not a gap in the repo — cite the commit you looked at.
 
 ## Maintenance tooling
 
