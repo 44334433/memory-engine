@@ -64,11 +64,10 @@ def feedback_probe(conn, days=7) -> dict:
               f"WHERE op='feedback' AND ts > {win}") or {"c": 0})["c"]
     # landed 口径=「本窗写过 feedback 的 distinct 条目里，outcome_at 也确实落进本窗」的行数：
     # 同条多次反馈只落一列（last-write-wins），用行账对比会虚报断链——distinct join 才是 S2 断言。
-    landed = (db.fetch_one(
-        conn, f"SELECT count(*) c FROM (SELECT DISTINCT memory_id FROM changelog "
-              f"WHERE op='feedback' AND ts > {win}) w "
-              f"JOIN memories m ON m.id = w.memory_id WHERE m.outcome_at > {win}")
-        or {"c": 0})["c"]
+    sql = (f"SELECT count(*) c FROM (SELECT DISTINCT memory_id FROM changelog "
+           f"WHERE op='feedback' AND ts > {win}) w "
+           f"JOIN memories m ON m.id = w.memory_id WHERE m.outcome_at > {win}")
+    landed = (db.fetch_one(conn, sql) or {"c": 0})["c"]
     pj = db.fetch_one(
         conn, "SELECT count(*) total, count(*) FILTER (WHERE polarity IS NOT NULL) nn "
               "FROM memories WHERE is_current AND ttl_state <> 'retired'") or {}
@@ -166,7 +165,7 @@ def core_block_staleness(last_fetch: float | None, started_at: float, now: float
         return {"ever_fetched_since_startup": False,
                 "process_uptime_s": round(now - started_at, 1),
                 "note": "本进程启动以来未收到 core-block 拉取（重启归零为进程内语义）"}
+    last_iso = datetime.fromtimestamp(last_fetch, tz=timezone.utc).isoformat(timespec="seconds")
     return {"ever_fetched_since_startup": True,
-            "last_fetch_iso": datetime.fromtimestamp(last_fetch, tz=timezone.utc)
-                              .isoformat(timespec="seconds"),
+            "last_fetch_iso": last_iso,
             "staleness_s": round(now - last_fetch, 1)}

@@ -166,7 +166,7 @@ def test_live_feedback_group_and_retrieved_ids():
         assert st == 200, f"新字段反馈应 200，得 {st}: {d}"
         assert d["group"] == group and d["retrieved_ids_count"] == 2
         # E1 聚合查询
-        st, agg = _get(f"/v1/feedback/groups?days=1")
+        st, agg = _get("/v1/feedback/groups?days=1")
         assert st == 200 and any(g["group"] == group for g in agg["groups"]), \
             f"组聚合列表应含 {group}: {agg}"
         row = next(g for g in agg["groups"] if g["group"] == group)

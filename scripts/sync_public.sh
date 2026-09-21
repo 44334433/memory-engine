@@ -64,6 +64,14 @@ if ! (cd "$PUB" && PYTHONPATH=src "$SMOKE_PY" -c "import memory_engine.app" 2>/t
   rollback
 fi
 
-echo "== 同步完成 + 冒烟绿（import memory_engine.app OK, py=$SMOKE_PY）=="
+# —— 闸 3：flake8 lint（2026-09-21 补，G-2：run38 lint 复红 3 条实锤冒烟闸不含 lint；
+#     口径对齐 CI=基础 flake8 默认 ignore，插件 D/Q/I 类 CI 不装不报）——
+if ! (cd "$PUB" && flake8 src tests sdk/python --max-line-length=120 --extend-ignore=E203 >/tmp/sync_public_lint.err 2>&1); then
+  echo "FATAL: flake8 lint 不过（对齐 CI 口径）——"
+  head -10 /tmp/sync_public_lint.err
+  rollback
+fi
+
+echo "== 同步完成 + 冒烟绿（import memory_engine.app OK, py=$SMOKE_PY）+ lint 绿 =="
 git -C "$PUB" status --short
 echo "下一步（人工）：git -C $PUB diff 审阅 → commit → push"
