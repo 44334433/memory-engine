@@ -1,7 +1,7 @@
 """图谱可视化只读 API：GET /v1/graph（P0，2026-09-17）。
 
 entities/edges 弱图 → sigma.js viewer 数据。只读，无任何写入路径。
-边权重：edges 表无权重列，P0 常数 1.0 占位（后续可接 access_count/共现度）。
+边权重：P0 常数 1.0 占位 → 多跳批（2026-09-21 迁移 010）透出 edges.weight 真实乘子。
 路由注册由 app.create_app 收口（本文件不改既有文件）。
 """
 import logging
@@ -50,7 +50,7 @@ def _fetch_edges(conn, bank: Optional[str], domain: Optional[str], limit: int) -
     where, params = _edges_where(bank, domain)
     return db.fetch_all(
         conn,
-        f"SELECT e.id, e.src_mid, e.dst_mid, e.entity_id, e.etype FROM edges e "
+        f"SELECT e.id, e.src_mid, e.dst_mid, e.entity_id, e.etype, e.weight FROM edges e "
         f"WHERE {where} ORDER BY e.valid_at DESC, e.id LIMIT %s",
         (*params, limit))
 
@@ -107,7 +107,7 @@ def get_graph(request: Request, bank: Optional[str] = None,
 
     edges = [{"source": str(e["src_mid"]),
               "target": str(e["dst_mid"] if e["dst_mid"] is not None else e["entity_id"]),
-              "relation": e["etype"], "weight": 1.0}
+              "relation": e["etype"], "weight": float(e["weight"]) if e.get("weight") is not None else 1.0}
              for e in edge_rows]
 
     return {"nodes": nodes, "edges": edges,

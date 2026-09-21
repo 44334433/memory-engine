@@ -9,6 +9,7 @@ from typing import Sequence
 
 import psycopg
 
+from . import config
 from .util import uuid7
 
 log = logging.getLogger("memory-engine.db")
@@ -323,66 +324,140 @@ def upsert_entity(conn, name: str, etype: str) -> str:
 
 
 def insert_edge(conn, src_mid, dst_mid=None, entity_id=None, etype="related",
-                valid_at=None, source="manual") -> str | None:
+                valid_at=None, source="manual", weight=1.0) -> str | None:
     """插入现行边（三元组唯一索引去重，重复→ON CONFLICT 返回 None）。
 
     observe-only 铁律（G15）：本函数只写 edges 表，绝不触碰 memories——调用方（LLM 抽取/
     弱图脚本）对 contradicts 边同样只记录；invalid_at 恒为 NULL（边级双时序由 P2 矛盾自动失效接管）。
+    weight（多跳批 2026-09-21，迁移 010）：持久边权乘子，缺省 1.0=零行为；消歧/共现度等
+    离线通道可落权重于此，召回路遍历按乘积传播（见 graph_expand）。
     """
     if etype not in EDGE_TYPES:
         raise ValueError(f"etype 必须为 {EDGE_TYPES}，收到 {etype!r}")
+    if weight is None or float(weight) <= 0:
+        raise ValueError(f"weight 必须 > 0，收到 {weight!r}")
     row = fetch_one(
         conn,
-        """INSERT INTO edges(id, src_mid, dst_mid, entity_id, etype, valid_at, source)
-           VALUES (%s,%s,%s,%s,%s,COALESCE(%s::timestamptz, now()),%s)
+        """INSERT INTO edges(id, src_mid, dst_mid, entity_id, etype, valid_at, source, weight)
+           VALUES (%s,%s,%s,%s,%s,COALESCE(%s::timestamptz, now()),%s,%s)
            ON CONFLICT DO NOTHING RETURNING id""",
-        (str(uuid7()), src_mid, dst_mid, entity_id, etype, valid_at, source),
+        (str(uuid7()), src_mid, dst_mid, entity_id, etype, valid_at, source, float(weight)),
     )
     return str(row["id"]) if row else None
 
 
-# 第四路图召回：从三路命中（seeds）出发 1-2 跳邻拉（P1 第二批 ⑤）。
-# 单递归项 + LATERAL 三分支（PG 只允许最后一个 UNION 分支递归，实测 PG18 验证）：
-#   记忆↔记忆（双向）+ 记忆↔实体↔记忆（同实体拉回）；失效边/retired/archived/非现行版本一律不拉。
-# 占位符全定位：params 顺序 = (*seeds, hops, *vis_params, *seeds, limit)（seeds 出现两次）。
-GRAPH_WALK_SQL = """
-WITH RECURSIVE walk(node, hop) AS (
-    SELECT h.mid, 0 FROM unnest(%s::uuid[]) AS h(mid)
-  UNION
-    SELECT n.nid, w.hop + 1
-    FROM walk w
-    CROSS JOIN LATERAL (
-        SELECT e.dst_mid AS nid FROM edges e
-          WHERE e.src_mid = w.node AND e.dst_mid IS NOT NULL AND e.invalid_at IS NULL
-            AND e.src_mid IS DISTINCT FROM e.dst_mid
-      UNION
-        SELECT e.src_mid FROM edges e
-          WHERE e.dst_mid = w.node AND e.invalid_at IS NULL
-      UNION
-        SELECT e2.src_mid FROM edges e1
-          JOIN edges e2 ON e2.entity_id = e1.entity_id AND e2.invalid_at IS NULL
-          WHERE e1.src_mid = w.node AND e1.entity_id IS NOT NULL AND e1.invalid_at IS NULL
-    ) n
-    WHERE w.hop < %s AND n.nid IS NOT NULL AND n.nid <> w.node
-)
-SELECT w.node AS id, min(w.hop) AS hop
-FROM walk w
-JOIN memories m ON m.id = w.node
-  AND m.is_current AND m.ttl_state NOT IN ('archived','retired')
-  AND ({vis_sql})
-WHERE w.hop > 0 AND NOT w.node = ANY(%s::uuid[])   -- 种子自身不再拉回（防环自增权）
-GROUP BY w.node ORDER BY 2, 1
-LIMIT %s
+# —————————————————— 第四路图召回：逐跳 BFS（多跳批 2026-09-21 重构） ——————————————————
+# 原实现为单条递归 CTE（P1 二批）：有 UNION 元组去重但无路径防环、无每跳候选上限、
+# 边时序只认 invalid_at IS NULL（不吃 as_of）、无衰减。本批升级为 Python 侧逐跳 BFS：
+#   ① visited 集合去重（真防环：节点在最小跳定格，杜绝路径爆炸与环路复访）；
+#   ② 每跳按边权乘积降序截 top-K（GRAPH_HOP_TOPK），frontier 有界，深度上限 GRAPH_HOPS_MAX；
+#   ③ 边/节点双时序：缺省现行边（invalid_at IS NULL，走部分索引零回退）；as_of 给定=
+#     「当时的图」（valid_at<=t<invalid_at 窗，节点可见性同窗，走迁移 010 非部分索引）；
+#   ④ 途经实体（entity 桥分支）输出 via，供召回侧同名多 etype 消歧归因；
+#   ⑤ 持久边权 e.weight 乘积传播（默认 1.0=与旧语义逐字节兼容）。
+# 兼容：返回行仍含 id/hop；新增 via/w 键（recall 侧全部 .get() 容错，monkeypatch 旧形状不破）。
+
+def _edge_time_sql(alias: str, as_of) -> tuple[str, list]:
+    """边时序谓词：缺省现行（partial index 友好）；as_of=事件时间窗（Graphiti 同构）。"""
+    if as_of is None:
+        return f"{alias}.invalid_at IS NULL", []
+    return (f"{alias}.valid_at <= %s::timestamptz "
+            f"AND ({alias}.invalid_at IS NULL OR {alias}.invalid_at > %s::timestamptz)"), [as_of, as_of]
+
+
+# 单步扩展：frontier 每节点三分支（mem↔mem 双向 + mem↔实体↔mem 桥），各支独立 LIMIT
+# 控扇出（防 hub 爆量）；visited 排除=防环+去重（含种子，种子自身不再拉回，与旧语义一致）。
+_GRAPH_STEP_SQL = """
+SELECT x.nid, x.via, x.w
+FROM unnest(%s::uuid[]) AS f(node)
+CROSS JOIN LATERAL (
+    (SELECT e.dst_mid AS nid, NULL::uuid AS via, COALESCE(e.weight, 1.0) AS w
+       FROM edges e
+      WHERE e.src_mid = f.node AND e.dst_mid IS NOT NULL AND e.src_mid IS DISTINCT FROM e.dst_mid
+        AND ({ef1}) ORDER BY e.id LIMIT %s)
+  UNION ALL
+    (SELECT e.src_mid, NULL::uuid, COALESCE(e.weight, 1.0)
+       FROM edges e
+      WHERE e.dst_mid = f.node AND ({ef2}) ORDER BY e.id LIMIT %s)
+  UNION ALL
+    (SELECT e2.src_mid, e1.entity_id, COALESCE(e1.weight, 1.0) * COALESCE(e2.weight, 1.0)
+       FROM edges e1
+       JOIN edges e2 ON e2.entity_id = e1.entity_id AND e2.invalid_ok_placeholder
+      WHERE e1.src_mid = f.node AND e1.entity_id IS NOT NULL AND ({ef3}) ORDER BY e1.id LIMIT %s)
+) x
+WHERE x.nid IS NOT NULL AND NOT (x.nid = ANY(%s::uuid[]))
 """
 
 
 def graph_expand(conn, seeds: list, hops: int, vis_sql: str, vis_params: Sequence,
-                 limit: int) -> list[dict]:
-    """图邻拉：返回 [{id, hop}]（hop 升序稳定排序，供 RRF rank）。种子/失效/retired 不返回。"""
-    if not seeds:
-        return []
+                 limit: int, as_of=None, per_hop_k: int | None = None) -> list[dict]:
+    """逐跳 BFS 图邻拉：返回 [{id, hop, via, w}]（hop 升序、同跳边权乘积降序稳定排序）。
+
+    hops=0/空种子 → []（图路整体关闭）。seeds 恒视为 visited（不再拉回）。
+    as_of（datetime|None）：边按事件时间窗过滤；节点输出过滤同步——缺省仅现行+非
+    retired/archived 记忆，as_of 口径按时间窗+排除 retired。
+    """
     import uuid as _uuid
-    ids = [s if isinstance(s, _uuid.UUID) else _uuid.UUID(str(s)) for s in seeds]  # uuid[] 原生绑定
-    sql = GRAPH_WALK_SQL.format(vis_sql=vis_sql)
-    params = (ids, int(hops), *vis_params, ids, int(limit))
-    return fetch_all(conn, sql, params)
+    seed_ids = [s if isinstance(s, _uuid.UUID) else _uuid.UUID(str(s)) for s in seeds]
+    hops = int(hops)
+    if not seed_ids or hops <= 0 or limit <= 0:
+        return []
+    per_hop_k = int(per_hop_k or config.GRAPH_HOP_TOPK)
+    visited: set = set(seed_ids)
+    frontier = seed_ids
+    found: list[dict] = []
+    ef1, p1 = _edge_time_sql("e", as_of)
+    ef2, p2 = _edge_time_sql("e", as_of)
+    ef3a, p3a = _edge_time_sql("e1", as_of)
+    ef3b, p3b = _edge_time_sql("e2", as_of)
+    step_sql = (_GRAPH_STEP_SQL
+                .replace("{ef1}", ef1).replace("{ef2}", ef2)
+                .replace("{ef3}", ef3a).replace("e2.invalid_ok_placeholder", ef3b))
+    fanout = max(per_hop_k, config.GRAPH_FANOUT_PER_DIR)
+    for h in range(1, hops + 1):
+        if not frontier or len(found) >= limit:
+            break
+        params = (frontier, *p1, fanout, *p2, fanout, *p3a, *p3b, fanout, sorted(visited))
+        # psycopg uuid[]：list[UUID] 原生适配；sorted 稳定占位（uuid 可排序）
+        rows = fetch_all(conn, step_sql, params)
+        agg: dict = {}
+        for r in rows:
+            nid, via, w = r["nid"], r["via"], float(r["w"])
+            cur = agg.get(nid)
+            if cur is None:
+                agg[nid] = [w, {via} if via is not None else set()]
+            else:
+                if w > cur[0]:
+                    cur[0] = w
+                if via is not None:
+                    cur[1].add(via)
+        # 每跳候选上限 top-K（边权乘积降序、同分按 id 稳定）+ 总上限截断
+        ranked = sorted(agg.items(), key=lambda kv: (-kv[1][0], str(kv[0])))[:per_hop_k]
+        next_frontier = []
+        for nid, (w, vias) in ranked:
+            if len(found) >= limit:
+                break
+            found.append({"id": nid, "hop": h, "via": sorted(str(v) for v in vias), "w": w})
+            visited.add(nid)
+            next_frontier.append(nid)
+        frontier = next_frontier
+    if not found:
+        return []
+    # 节点输出过滤（与旧语义一致：记忆节点现行+非 retired/archived；as_of=时间窗口径）
+    ids = [row["id"] for row in found]
+    if as_of is None:
+        pred, pred_params = ("m.is_current AND m.ttl_state NOT IN ('archived','retired')", [])
+    else:
+        pred = ("COALESCE(m.valid_at, m.created_at) <= %s::timestamptz "
+                "AND (m.invalid_at IS NULL OR m.invalid_at > %s::timestamptz) "
+                "AND m.ttl_state <> 'retired'")
+        pred_params = [as_of, as_of]
+    keep = {r["id"] for r in fetch_all(
+        conn, f"SELECT m.id FROM memories m WHERE m.id = ANY(%s::uuid[]) AND ({pred}) AND ({vis_sql})",
+        (ids, *pred_params, *vis_params))}
+    return [row for row in found if row["id"] in keep]
+
+
+# 第四路图召回：从三路命中（seeds）出发 1-2 跳邻拉（P1 第二批 ⑤）。
+# （2026-09-21 多跳批：原单条递归 CTE GRAPH_WALK_SQL 已升级为上方逐跳 BFS graph_expand，
+#   旧 SQL 连同其种子自排除/现行边语义一并由新实现覆盖——此处不留死码。）

@@ -97,6 +97,8 @@ class RecallRequest(BaseModel):
     caller: str = "main"
     top_k: int = 10
     filters: dict = {}
+    graph_hops: Optional[int] = None   # 件1（2026-09-21）：图路跳数请求级覆盖；None=config.GRAPH_HOPS(2)
+    # 0=关图路；上限 config.GRAPH_HOPS_MAX(3)；超限/负数=400 带原因
 
 
 @router.post("/retain")
@@ -195,12 +197,17 @@ def recall(req: RecallRequest, request: Request, bg: BackgroundTasks):
         recall_mod.validate_filters(req.filters)   # 坏参 400 带原因（P0 前：坏 date_range 裸 500）
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
+    if req.graph_hops is not None and not (0 <= req.graph_hops <= config.GRAPH_HOPS_MAX):
+        raise HTTPException(400,
+                            f"graph_hops 必须为 0..{config.GRAPH_HOPS_MAX}"
+                            f"（0=关图路；超限=邻接爆炸防护），收到 {req.graph_hops}")
     eng = request.app.state.engine
     try:
         res = recall_mod.recall(eng.db, eng.embedder, req.query, req.bank, req.caller,
                                 max(1, min(req.top_k, 100)), req.filters,
                                 # W3：None=关（缺省），零开销；getattr=兼容旧 fake engine（SimpleNamespace）
-                                reranker=getattr(eng, "reranker", None))
+                                reranker=getattr(eng, "reranker", None),
+                                graph_hops=req.graph_hops)   # 件1：请求级跳数（None=缺省）
     except recall_mod.RecallRouteError as e:
         # P1 语义演进：503 只留给全路失败（部分路失败已在 recall 内降级为 200+degraded+failed_routes）
         raise HTTPException(503, detail={

@@ -18,6 +18,8 @@ from memory_engine.api_core import RetainItem
 
 MIGRATION_002 = (Path(__file__).resolve().parent.parent
                  / "scripts" / "migrations" / "002_bitemporal_graph_multihost.sql")
+MIGRATION_010 = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "migrations" / "010_edge_weight.sql")   # 多跳批：edges.weight+伴生索引
 
 
 def _fake_pool(conn):
@@ -104,9 +106,11 @@ def pg():
                     (uuid.uuid4(),))
         cur.execute("INSERT INTO memories (id, created_at) VALUES (%s, '2026-02-01T00:00:00+00:00')",
                     (uuid.uuid4(),))
-        # 首次应用迁移 002（生产同款 SQL，事务内整体应用）
+        # 首次应用迁移 002（生产同款 SQL，事务内整体应用）+ 010（多跳批：weight 列，
+        # 生产现网同态=002..010 全部已应用）
         with conn.transaction():
             cur.execute(MIGRATION_002.read_text(encoding="utf-8"))
+            cur.execute(MIGRATION_010.read_text(encoding="utf-8"))
     yield conn, schema
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")

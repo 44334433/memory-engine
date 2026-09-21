@@ -4,7 +4,10 @@ final = rrf × pri(0.9+0.05·priority) × life(ttl/verify) × stale(fresh/aging/
         × tier(source_tier 降权 P1：web=0.85/cron=0.9 可配)
 P1 降级语义（2026-09-16 拍板）：嵌入路失败→降级纯 FTS+时序路（200+degraded+failed_routes）；
 503 只留给全路失败（P0「禁吞禁静默」不变，显式降级取代单路失败即 503）。
+多跳图谱批（2026-09-21）：图路=逐跳 BFS（graph_hops 参数可配，缺省 config.GRAPH_HOPS=2，
+上限 3）；graph 分量 = RRF × 边权乘积 × 衰减^跳-1 × 消歧乘子；as_of 快照口径贯穿边遍历。
 """
+import json
 import logging
 import time
 import uuid
@@ -167,6 +170,102 @@ def _graph_seeds(*route_rows: list) -> list:
     return out
 
 
+def _cos(a: list[float], b: list[float]) -> float:
+    """余弦相似度（纯 stdlib；1024 维 ~0.1ms，#23 零成本优化：单次遍历算 dot/norm）。"""
+    dot = na = nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return dot / (na ** 0.5 * nb ** 0.5)
+
+
+def _entity_neighborhood_cos(conn, qvec: list[float], entity_ids: list[str],
+                             as_of_dt: datetime | None) -> dict[str, float | None]:
+    """实体邻域文档嵌入均值 vs query 嵌入的 cos（件2 消歧信号源）。
+
+    邻域=现行挂在该实体上的记忆嵌入（≤GRAPH_DISAMBIG_NEIGH_MAX 样本）；无可用嵌入→None
+    （歧义不可判=不罚，宁保守不误伤）。as_of 口径同图遍历：边/节点按事件时间窗。
+    """
+    out: dict[str, float | None] = {}
+    for eid in entity_ids:
+        if as_of_dt is None:
+            sql = ("SELECT m.embedding::text AS emb FROM edges e JOIN memories m ON m.id = e.src_mid "
+                   "WHERE e.entity_id = %s AND m.embedding IS NOT NULL AND m.is_current "
+                   "AND m.ttl_state NOT IN ('archived','retired') AND e.invalid_at IS NULL "
+                   "LIMIT %s")
+            params = (eid, config.GRAPH_DISAMBIG_NEIGH_MAX)
+        else:
+            sql = ("SELECT m.embedding::text AS emb FROM edges e JOIN memories m ON m.id = e.src_mid "
+                   "WHERE e.entity_id = %s AND m.embedding IS NOT NULL "
+                   "AND COALESCE(m.valid_at, m.created_at) <= %s::timestamptz "
+                   "AND (m.invalid_at IS NULL OR m.invalid_at > %s::timestamptz) "
+                   "AND m.ttl_state <> 'retired' AND e.invalid_at IS NULL LIMIT %s")
+            params = (eid, as_of_dt, as_of_dt, config.GRAPH_DISAMBIG_NEIGH_MAX)
+        try:
+            docs = [json.loads(r["emb"]) for r in db.fetch_all(conn, sql, params) if r["emb"]]
+        except (json.JSONDecodeError, TypeError):
+            docs = []
+        if not docs:
+            out[eid] = None
+            continue
+        dim = len(docs[0])
+        mean = [sum(d[i] for d in docs) / len(docs) for i in range(dim)]
+        out[eid] = _cos(qvec, mean)
+    return out
+
+
+def _graph_disambiguate(conn, qvec: list[float] | None, rows_g: list[dict],
+                        as_of_dt: datetime | None) -> tuple[dict, int]:
+    """同名多 etype 实体消歧（件2）：query 嵌入 vs 实体邻域文档嵌入均值选边。
+
+    返回 ({neighbor_id: factor}, collision_count)。策略拍板：entities 唯一约束不动、
+    实体名不改——结果只落召回侧边权重乘子（败方 GRAPH_DISAMBIG_PENALTY）；
+    cos 差 ≤ GRAPH_DISAMBIG_MARGIN 视为「真歧义」不罚（防假精度）。
+    消歧失败=中性放行（图路本体不受累），显式 log，不静默。
+    """
+    if not config.GRAPH_DISAMBIG or not qvec or not rows_g:
+        return {}, 0
+    try:
+        vias = {str(v) for r in rows_g for v in (r.get("via") or [])}
+        if len(vias) < 2:
+            return {}, 0
+        ents = db.fetch_all(
+            conn, "SELECT id, lower(name) AS ln FROM entities WHERE id = ANY(%s::uuid[])",
+            ([uuid.UUID(v) for v in vias],))
+        by_name: dict = {}
+        for e in ents:
+            by_name.setdefault(e["ln"], []).append(str(e["id"]))
+        collide = {ln: ids for ln, ids in by_name.items() if len(ids) > 1}
+        if not collide:
+            return {}, 0
+        cosmap = _entity_neighborhood_cos(conn, qvec, [i for ids in collide.values() for i in ids],
+                                          as_of_dt)
+        penalized: set = set()
+        for ids in collide.values():
+            scored: list = []
+            for i in ids:
+                c = cosmap.get(i)
+                if c is not None:
+                    scored.append((c, i))
+            scored.sort(reverse=True)
+            if len(scored) < 2:
+                continue
+            best = scored[0][0]
+            penalized.update(i for c, i in scored[1:] if best - c > config.GRAPH_DISAMBIG_MARGIN)
+        factors: dict = {}
+        for r in rows_g:
+            rv = [str(v) for v in (r.get("via") or [])]
+            if rv and all(v in penalized for v in rv):
+                factors[r["id"]] = config.GRAPH_DISAMBIG_PENALTY
+        return factors, len(collide)
+    except Exception as e:  # noqa: BLE001 —— 消歧子路失败=中性，显式日志（图主路已在手）
+        log.warning("graph disambiguation failed (neutral): %s", e)
+        return {}, 0
+
+
 def _tenant_forced_filters(filters: dict | None) -> dict | None:
     """多租户预备层（2026-09-19 拍板变更：触发条件提前，用户显式拍板；DB 侧配套迁移 008_rls.sql）。
 
@@ -184,9 +283,16 @@ def _tenant_forced_filters(filters: dict | None) -> dict | None:
 
 
 def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | None, caller: str | None,
-           top_k: int, filters: dict | None, reranker: "Qwen3Reranker | None" = None) -> dict:
+           top_k: int, filters: dict | None, reranker: "Qwen3Reranker | None" = None,
+           graph_hops: int | None = None) -> dict:
     filters = _tenant_forced_filters(filters)   # 多租户强制过滤（关=原对象直通，零行为）
     t0 = time.perf_counter()
+    # 件1 参数：graph_hops=None→config 缺省；0=图路整体关闭；钳到 [0, GRAPH_HOPS_MAX]（API 层已校验，
+    # 此处防御性兜底=非 HTTP 调用方同语义）。件3：filters.as_of 贯穿图遍历（「当时的图」）。
+    hops = config.GRAPH_HOPS if graph_hops is None else int(graph_hops)
+    hops = max(0, min(hops, config.GRAPH_HOPS_MAX))
+    as_of_raw = (filters or {}).get("as_of")
+    as_of_dt = datetime.fromisoformat(as_of_raw.replace("Z", "+00:00")) if as_of_raw else None
     # —— P1 降级批：嵌入路失败→登记后跳过矢量路，降级纯 FTS+时序路（宁降级不 503/不炸调用）——
     failed_routes: dict[str, str] = {}
     qvec_pg: str | None = None
@@ -232,16 +338,28 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
         # 图路是增强不是主路：失败只登记 failed_routes.graph（降级显式），不参与「全路失败 503」判定。
         rows_g: list = []
         graph_attempted = False
-        if config.W_GRAPH > 0:
+        graph_meta: dict = {"hops": hops}
+        dis_factors: dict = {}
+        if config.W_GRAPH > 0 and hops > 0:
             seeds = _graph_seeds(rows_a, rows_b, rows_c)
+            graph_meta["seeds"] = len(seeds)
             if seeds:
                 graph_attempted = True
                 try:
-                    rows_g = db.graph_expand(conn, seeds, config.GRAPH_HOPS,
-                                             vis_sql, vis_params, config.GRAPH_MAX_NEIGHBORS)
+                    rows_g = db.graph_expand(conn, seeds, hops, vis_sql, vis_params,
+                                             config.GRAPH_MAX_NEIGHBORS, as_of=as_of_dt)
+                    # 件2：同名多 etype 实体消歧（query 嵌入 vs 实体邻域文档嵌入均值选边，
+                    # 结果只落边权重乘子；entities 唯一约束/实体名不动）
+                    if rows_g and config.GRAPH_DISAMBIG and qvec_pg is not None:
+                        dis_factors, n_coll = _graph_disambiguate(
+                            conn, json.loads(qvec_pg), rows_g, as_of_dt)
+                        graph_meta["disambig_collisions"] = n_coll
+                        if dis_factors:
+                            graph_meta["disambig_penalized"] = len(dis_factors)
                 except Exception as e:  # noqa: BLE001 —— 图路失败显式登记（禁静默），不炸主召回
                     log.warning("route D(graph) failed: %s", e)
                     failed_routes["graph"] = str(e)[:300]
+        graph_meta["neighbors"] = len(rows_g)
     if set(failed_routes) >= set(attempted):
         raise RecallRouteError(failed_routes)   # 全路失败→API 503+degraded+retryable（P1 唯一 503 入口）
     degraded = bool(failed_routes)              # 部分路失败=显式降级 200（degraded+failed_routes 透出）
@@ -254,10 +372,16 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             entry = fused.setdefault(row["id"], {"rrf": 0.0, "routes": {}})
             entry["rrf"] += weight / (config.RRF_K + rank)
             entry["routes"][name] = rank
-    # graph 分量：邻拉结果按 hop 升序做 RRF rank，加进 fused（新邻条目仅有 graph 分量）
+    # graph 分量（多跳批 2026-09-21）：rank 由 graph_expand 的 hop 升序+同跳边权降序给出；
+    # 乘子链=衰减^跳-1（件1 ×0.5/跳）× 持久边权乘积（迁移 010）× 消歧因子（件2 败方罚）。
+    # monkeypatch/旧形状行无 hop/via/w 键 → .get 缺省=与 P1 二批语义逐字节兼容。
     graph_rrf: dict = {}
     for rank, row in enumerate(rows_g, start=1):
-        g = config.W_GRAPH / (config.RRF_K + rank)
+        hop = int(row.get("hop") or 1)
+        decay = config.GRAPH_HOP_DECAY ** max(0, hop - 1)
+        edge_w = float(row.get("w") if row.get("w") is not None else 1.0)
+        dis = float(dis_factors.get(row["id"], 1.0))
+        g = config.W_GRAPH / (config.RRF_K + rank) * decay * edge_w * dis
         graph_rrf[row["id"]] = g
         entry = fused.setdefault(row["id"], {"rrf": 0.0, "routes": {}})
         entry["rrf"] += g
@@ -267,8 +391,11 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
         routes = {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}
         if graph_attempted:
             routes["graph"] = len(rows_g)
-        return {"results": [], "took_ms": round((time.perf_counter() - t0) * 1000, 1),
-                "degraded": degraded, "failed_routes": failed_routes, "routes": routes}
+        out = {"results": [], "took_ms": round((time.perf_counter() - t0) * 1000, 1),
+               "degraded": degraded, "failed_routes": failed_routes, "routes": routes}
+        if graph_attempted or hops == 0:
+            out["graph_meta"] = graph_meta
+        return out
 
     with pool.connection() as conn:
         meta = db.hydrate(conn, list(fused.keys()))
@@ -307,8 +434,8 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
             "created_at": m["created_at"].isoformat() if m["created_at"] else None,
             "updated_at": m["updated_at"].isoformat() if m["updated_at"] else None,
         })
-    # RRF 同分 tie-break：updated_at 新者优先（外部反馈#2，2026-09-19）
     scored.sort(key=lambda d: (d["score"], d["updated_at"] or ""), reverse=True)
+    # RRF 同分 tie-break：updated_at 新者优先（外部反馈#2，2026-09-19）
     # —— W3 可插拔重排（RRF 融合+因子评分之后、top_k 截断之前）——
     # 关（reranker=None）=本段整体条件跳过，零张量零分配，存量行为逐字节不变。
     # 开=只对 top RERANK_TOP_N(20) 候选精排（#23 延迟预算）；乘法融合 final'=final×(floor+(1−floor)·p)，
@@ -331,10 +458,13 @@ def recall(pool: PgPool, embedder: EmbeddingProvider, query: str, bank: str | No
     routes = {"vector": len(rows_a), "fts": len(rows_b), "time": len(rows_c)}
     if graph_attempted:
         routes["graph"] = len(rows_g)
-    return {
+    out = {
         "results": scored[:top_k],
         "took_ms": round((time.perf_counter() - t0) * 1000, 1),
         "degraded": degraded,
         "failed_routes": failed_routes,
         "routes": routes,
     }
+    if graph_attempted or hops == 0:
+        out["graph_meta"] = graph_meta
+    return out

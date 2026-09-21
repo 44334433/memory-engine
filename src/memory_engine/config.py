@@ -120,10 +120,21 @@ TIER_WEIGHTS = {
 # 第四路图召回：从三路命中出发 1-2 跳邻拉（递归 CTE），RRF 融合加 graph 分量。
 # observe 期低调权重 0.5（可配 MEMORY_ENGINE_W_GRAPH）。
 W_GRAPH = float(os.environ.get("MEMORY_ENGINE_W_GRAPH", "0.5"))
-GRAPH_HOPS = int(os.environ.get("MEMORY_ENGINE_GRAPH_HOPS", "2"))            # 1-2 跳
+GRAPH_HOPS = int(os.environ.get("MEMORY_ENGINE_GRAPH_HOPS", "2"))            # 1-3 跳（缺省 2；请求级 graph_hops 可覆盖）
 GRAPH_SEEDS_PER_ROUTE = int(os.environ.get("MEMORY_ENGINE_GRAPH_SEEDS_PER_ROUTE", "10"))
 GRAPH_SEEDS_MAX = int(os.environ.get("MEMORY_ENGINE_GRAPH_SEEDS_MAX", "24"))
 GRAPH_MAX_NEIGHBORS = int(os.environ.get("MEMORY_ENGINE_GRAPH_MAX_NEIGHBORS", "30"))
+# —— 多跳图谱批（2026-09-21 拍板插队）：可配深度 + 衰减 + 每跳 top-K + 消歧 ——
+GRAPH_HOPS_MAX = int(os.environ.get("MEMORY_ENGINE_GRAPH_HOPS_MAX", "3"))    # 硬上限防邻接爆炸
+GRAPH_HOP_DECAY = float(os.environ.get("MEMORY_ENGINE_GRAPH_HOP_DECAY", "0.5"))  # 边权逐跳衰减 ×0.5/跳
+GRAPH_HOP_TOPK = int(os.environ.get("MEMORY_ENGINE_GRAPH_HOP_TOPK", "15"))   # 每跳候选上限（截断后进入下一层）
+GRAPH_FANOUT_PER_DIR = int(os.environ.get("MEMORY_ENGINE_GRAPH_FANOUT_PER_DIR", "50"))  # 单节点单方向扩展扇出硬顶（hub 防爆）
+# 同名多 etype 实体消歧：召回时按 query 嵌入 vs 实体邻域文档嵌入均值选边，
+# 结果落图分量权重（乘子），绝不改实体名/合并 entities 行（唯一约束不动）。
+GRAPH_DISAMBIG = os.environ.get("MEMORY_ENGINE_GRAPH_DISAMBIG", "1").strip().lower() not in ("0", "false", "off")
+GRAPH_DISAMBIG_PENALTY = float(os.environ.get("MEMORY_ENGINE_GRAPH_DISAMBIG_PENALTY", "0.3"))   # 败方边乘子
+GRAPH_DISAMBIG_MARGIN = float(os.environ.get("MEMORY_ENGINE_GRAPH_DISAMBIG_MARGIN", "0.05"))     # cos 差≤margin 视为歧义不罚
+GRAPH_DISAMBIG_NEIGH_MAX = int(os.environ.get("MEMORY_ENGINE_GRAPH_DISAMBIG_NEIGH_MAX", "30"))   # 邻域嵌入均值样本上限
 # G15（S1 级盲审硬约束，写死）：矛盾检测 observe-only——contradicts 边只记录进 edges 表，
 # 绝不触发 memories.invalid_at 置位；升 enforce 前置条件 = 金标边集 precision>=0.7
 # 且 30 天抽检通过。该条件未达成前，任何代码路径不得由 contradicts 边改写 memories。

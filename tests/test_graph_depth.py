@@ -21,6 +21,8 @@ MIGRATION_002 = (Path(__file__).resolve().parent.parent
                  / "scripts" / "migrations" / "002_bitemporal_graph_multihost.sql")
 MIGRATION_008 = (Path(__file__).resolve().parent.parent
                  / "scripts" / "migrations" / "008_superseded_by.sql")
+MIGRATION_010 = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "migrations" / "010_edge_weight.sql")
 
 
 def _mem_fields(**over) -> dict:
@@ -82,6 +84,7 @@ def pg():
         with conn.transaction():
             cur.execute(MIGRATION_002.read_text(encoding="utf-8"))
             cur.execute(MIGRATION_008.read_text(encoding="utf-8"))
+            cur.execute(MIGRATION_010.read_text(encoding="utf-8"))   # 多跳批：insert_edge 含 weight 列
     yield conn, schema
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")

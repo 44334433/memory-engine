@@ -143,12 +143,18 @@ CREATE TABLE IF NOT EXISTS edges (
   valid_at   timestamptz NOT NULL DEFAULT now(),
   invalid_at timestamptz,                    -- NULL=现行边（双时序边）
   source     text NOT NULL,                  -- weak_graph:<dim> | llm_extract | manual | supersede
+  weight     double precision NOT NULL DEFAULT 1.0 CHECK (weight > 0),
+                                              -- 多跳批（迁移 010）：持久边权乘子，召回遍历按乘积传播
   CHECK (dst_mid IS NOT NULL OR entity_id IS NOT NULL),
   CHECK (dst_mid IS NULL OR dst_mid <> src_mid)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src    ON edges (src_mid)    WHERE invalid_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_edges_dst    ON edges (dst_mid)    WHERE invalid_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_edges_entity ON edges (entity_id)  WHERE invalid_at IS NULL;
+-- as_of 历史遍历不吃 invalid_at IS NULL 部分索引——非部分伴生索引（迁移 010，多跳批）
+CREATE INDEX IF NOT EXISTS idx_edges_src_all    ON edges (src_mid);
+CREATE INDEX IF NOT EXISTS idx_edges_dst_all    ON edges (dst_mid);
+CREATE INDEX IF NOT EXISTS idx_edges_entity_all ON edges (entity_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_edge_mem ON edges (src_mid, dst_mid, etype)
   WHERE dst_mid IS NOT NULL AND invalid_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_edge_ent ON edges (src_mid, entity_id, etype)
