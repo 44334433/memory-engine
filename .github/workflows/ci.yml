@@ -59,7 +59,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install fastapi uvicorn "psycopg[binary]" pydantic httpx requests  # requests=integrations/langchain_memory runtime dep (run-32: collection ImportError)
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers pytest flake8
+          pip install transformers pytest flake8 mcp  # mcp = tests/test_mcp_server.py (stdlib-HTTP MCP stdio bridge)
           pip install -e sdk/python
 
       - name: Restore embedding model cache

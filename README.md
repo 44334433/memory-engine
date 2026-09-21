@@ -359,7 +359,25 @@ Two anti-marketing warnings. First, **those numbers are not comparable to our R@
 What exists today, what is queued, and one correction on the record (added 2026-09-21 — the round-5 review scored this repo's ecosystem from a stale snapshot):
 
 - **Today:** typed Python SDK — `sdk/python/memoryengine`, MIT, httpx, full `/v1` surface with exception mapping, 25 mock-transport tests (`7694b3f`, 2026-09-17); REST `/v1` (API surface above); CLI — `src/memory_engine/cli.py`; LangChain adapter — `BaseMemory` + `BaseRetriever` over HTTP (`integrations/langchain_memory.py`, `930a226`); zero-build graph UI (`deploy/graph.html`); full-corpus JSONL backup via `GET /v1/export`.
-- **Queued:** **MCP server** — registered decision item (backlog `7dd74d9f`, decided 2026-09-21): stdio bridge mapping the retain/recall/feedback/metrics endpoints; the shortest path to the multi-host line, ~1 person-day. **TS SDK** — on demand; no demand signal yet, deliberately unscheduled. **Import API** — planned: `GET /v1/export` exists but has no re-import counterpart endpoint; backup restore today means host-side tooling.
+- **Today (landed 2026-09-21):** **MCP server** — `src/memory_engine/mcp_server.py`, stdio transport on the official MCP Python SDK (`pip install mcp`; auto-detects v2 `MCPServer`, falls back to 1.x `FastMCP`). Six tools map 1:1 onto the REST surface — `memory_retain` / `memory_recall` / `memory_feedback` / `memory_get` / `memory_search_list` / `engine_metrics` — over HTTP, never direct to the DB, so the engine's validation/audit/poison-gate chain applies unchanged. Fails open: a tool error returns `ERROR: ...` text to the host instead of crashing the bridge. Env: `MEMORY_ENGINE_BASE` (default `http://127.0.0.1:8766`), `MEMORY_ENGINE_CALLER` (default `main`; any other value makes the engine treat this bridge as a distinct host — visibility narrows to `owner==caller`/`public` per `recall._vis_sql`). Trust boundary: stdio is spawned by the host inside the local trust envelope, all six tools open, no auth; exposing over remote HTTP would require an added auth layer (not in scope). Claude Desktop (`claude_desktop_config.json` `mcpServers` entry; same shape works for Cursor `mcp.json`):
+
+  ```json
+  {
+    "mcpServers": {
+      "memory-engine": {
+        "command": "python3",
+        "args": ["-m", "memory_engine.mcp_server"],
+        "env": {
+          "PYTHONPATH": "/absolute/path/to/memory-engine/src",
+          "MEMORY_ENGINE_BASE": "http://127.0.0.1:8766"
+        }
+      }
+    }
+  }
+  ```
+
+  `python3` must be an interpreter with `mcp` installed and the repo checked out; protocol smoke lives in `scripts/mcp_smoke.py` (spawn → initialize → tools/list → real recall).
+- **Queued:** **TS SDK** — on demand; no demand signal yet, deliberately unscheduled. **Import API** — planned: `GET /v1/export` exists but has no re-import counterpart endpoint; backup restore today means host-side tooling.
 - **Anti-misreading note:** "no Python SDK / no license / no contributing guide" — all three are false of this repo's `main`: `sdk/python/` shipped 2026-09-17, and `LICENSE` (MIT) and `CONTRIBUTING.md` have been in the tree since the first public snapshot (`9daa9c5`, 2026-09-16). A review that predates those commits describes staleness of the review, not a gap in the repo — cite the commit you looked at.
 
 ## Maintenance tooling

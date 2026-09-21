@@ -201,7 +201,8 @@ curl -s "localhost:8766/v1/memories/474c9f6d-81c3-…/chain?max_hops=5"
 现状、排队项、一条留档更正（2026-09-21 补——第五轮反馈读的是过时快照）：
 
 - **现状：** 类型化 Python SDK——`sdk/python/memoryengine`（MIT、httpx、全 `/v1` 面 + 异常映射、25 例 mock 传输测试，`7694b3f`，2026-09-17）；REST `/v1`；CLI——`src/memory_engine/cli.py`；LangChain 适配器（`integrations/langchain_memory.py`，`930a226`）；零构建图谱 UI（`deploy/graph.html`）；全量 JSONL 备份走 `GET /v1/export`。
-- **路线：** **MCP server**——已登记立项拍板（backlog `7dd74d9f`，2026-09-21）：stdio 桥映射 retain/recall/feedback/metrics 端点，是多宿主路线的最短路径、约 1 人日。**TS SDK**——按需；尚无需求信号，刻意不排期。**导入 API**——planned：`GET /v1/export` 已存在但没有对等的重导入端点，备份恢复目前靠宿主侧工具。
+- **现状（2026-09-21 落地）：** **MCP server**——`src/memory_engine/mcp_server.py`，stdio 传输，官方 MCP Python SDK（`pip install mcp`；自动适配 v2 `MCPServer`/1.x `FastMCP`）。六工具 1:1 映射 REST 面（`memory_retain`/`memory_recall`/`memory_feedback`/`memory_get`/`memory_search_list`/`engine_metrics`），只走 HTTP 不直连 DB——引擎侧验证/审计/投毒闸链原样生效。fail-open：工具异常向宿主返回 `ERROR: ...` 文本，桥进程不崩。环境变量：`MEMORY_ENGINE_BASE`（缺省 `http://127.0.0.1:8766`）、`MEMORY_ENGINE_CALLER`（缺省 `main`；改名即被引擎视为独立宿主，可见性按 `owner==caller`/`public` 收紧）。信任边界：stdio 由宿主在本机拉起，六工具全开、无认证；远程 HTTP 暴露需另加认证层（不在本批）。Claude Desktop / Cursor 配置片段见 README.md 同节（`command: python3` + `PYTHONPATH=<repo>/src` + `-m memory_engine.mcp_server`），协议冒烟见 `scripts/mcp_smoke.py`。
+- **路线：** **TS SDK**——按需；尚无需求信号，刻意不排期。**导入 API**——planned：`GET /v1/export` 已存在但没有对等的重导入端点，备份恢复目前靠宿主侧工具。
 - **防误读声明：**「无 Python SDK / 无 license / 无贡献指南」三条对本仓 `main` 均为伪：`sdk/python/` 2026-09-17 已发布，`LICENSE`（MIT）与 `CONTRIBUTING.md` 自首个公开快照（`9daa9c5`，2026-09-16）即在树中。早于这些 commit 的评审描述的是评审的时滞，不是仓库的缺口——请附上你查看时的 commit。
 
 ## 运维工具
