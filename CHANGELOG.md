@@ -6,7 +6,7 @@ All notable changes, newest first. Three rules keep this honest:
 - Every functional line cites a commit or a path that reproduces it. Claims that cannot be checked do not get an entry.
 - The README states what is true now; this file states what changed when. If a release only re-arranges the README, it still gets a line.
 
-## [Unreleased] — since tag v0.5.0 (2026-09-19), 17 commits
+## [v0.5.1] — 2026-09-21 — since tag v0.5.0 (2026-09-19), 45 commits
 
 - feat(mcp): MCP server over stdio — `src/memory_engine/mcp_server.py`, six tools (`memory_retain`/`memory_recall`/`memory_feedback`/`memory_get`/`memory_search_list`/`engine_metrics`) bridged to `/v1` REST (no direct DB: validation, audit and poison gates apply to MCP-hosted writes too), official `mcp` SDK with v2/1.x class-name fallback, fail-open error text, `MEMORY_ENGINE_BASE/CALLER/TIMEOUT` env; 13 hermetic tests (CI installs `mcp` so they run, not skip) + `scripts/mcp_smoke.py` protocol handshake smoke (mirror of prod `d8db017`; decided 2026-09-21, backlog `7dd74d9f`)
 
@@ -49,7 +49,7 @@ The week the store grew categories and closed the outcome loop:
 
 - Bi-temporal supersede: a revision truncates the old row's `invalid_at` and re-inserts a new version — history is kept, not overwritten; in-place edits of historical rows return 409 (`e5a0fb9`)
 - Knowledge-graph foundation: `entities`/`edges` tables, co-occurrence + weak-graph edges, LLM typed-relation extraction (related / parent_child / causal / contradicts — contradicts is observe-only, promotion gated on labeled precision ≥0.7 + 30-day sampling), fourth recall route (graph, observe weight 0.5, `score_parts.graph` exposed)
-- Multi-host columns (`tenant_id`, `agent_id`) carried from here on — enforcement did not arrive until the RLS prep layer (Unreleased)
+- Multi-host columns (`tenant_id`, `agent_id`) carried from here on — enforcement did not arrive until the RLS prep layer (v0.5.1)
 - Migration 002, idempotent
 
 ## v0.2.0-phase2 — 2026-09-16 (open-source snapshot `9daa9c5`)
