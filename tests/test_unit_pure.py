@@ -63,7 +63,7 @@ def test_derive_title_first_line_and_cap():
 
 # ---------- config：env 覆盖语义（脱敏后的可配置性契约） ----------
 def test_config_defaults():
-    assert config.BANKS == ("hermes", "hermes-sessions", "knowledge", "reflection")
+    assert config.BANKS == ("hermes", "hermes-sessions", "knowledge", "reflection", "hermes-docs")
     assert config.STALE_WEIGHTS == {"fresh": 1.0, "aging": 0.9, "stale": 0.7}
     assert config.EMBED_DIM == 1024
 
@@ -89,6 +89,6 @@ def test_home_env_controls_base_dir(monkeypatch):
     assert str(config.BASE_DIR).endswith("hermes-data/memory-engine")
 
 
-@pytest.mark.parametrize("bank", ["hermes", "hermes-sessions", "knowledge", "reflection"])
+@pytest.mark.parametrize("bank", ["hermes", "hermes-sessions", "knowledge", "reflection", "hermes-docs"])
 def test_bank_whitelist(bank):
     assert bank in config.BANKS
