@@ -176,6 +176,18 @@ curl -s localhost:8766/v1/health | jq      # expect: status=ok, all four true
 pytest tests/ -v
 ```
 
+## Accessing from mainland China
+
+GitHub direct connectivity from mainland China is intermittent — if `git clone` stalls, use a community accelerator (both verified HTTP 200 on 2026-09-23; third-party accelerators rotate over time, treat as best-effort):
+
+```bash
+git clone https://ghfast.top/https://github.com/44334433/memory-engine.git
+# or
+git clone https://gh-proxy.com/https://github.com/44334433/memory-engine.git
+```
+
+A mainland-reachable synced mirror is planned (gitcode import). Until it lands, the accelerators above are the shortest working path.
+
 ## Five-minute demo
 
 Four steps from empty to auditable memory — every command below and every output shown was run against the same `/v1` surface this README documents (captured 2026-09-20; `…` marks trimmed ids and text). The database layer is the compose image from Quick Start (`docker/`), nothing else.

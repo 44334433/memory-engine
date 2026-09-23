@@ -75,6 +75,18 @@ curl -s localhost:8766/v1/health | jq      # 期望: status=ok, 四真全 true
 pytest tests/ -v
 ```
 
+## 国内访问
+
+GitHub 国内直连时通时断（间歇性阻断）——`git clone` 卡住时用社区加速站（两条均 2026-09-23 实测 HTTP 200；第三方加速站会轮换，尽力而为口径）：
+
+```bash
+git clone https://ghfast.top/https://github.com/44334433/memory-engine.git
+# 或
+git clone https://gh-proxy.com/https://github.com/44334433/memory-engine.git
+```
+
+国内可达的同步镜像在计划中（gitcode 导入）；镜像落地前，上述加速命令是最短可用路径。
+
 ## 五分钟上手（demo）
 
 四步从零到可审计记忆——以下每条命令与输出均为 2026-09-20 对同一 `/v1` 面实跑采集（`…` 为省略的 id/文本），数据库层就是快速开始里的 compose 镜像（`docker/`），别无他物。
